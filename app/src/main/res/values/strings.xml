@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Almanac</string>
+
+    <string name="widget_today_compact_label">Today Weather</string>
+    <string name="widget_today_compact_desc">Current temperature, condition, and high/low in a compact 2×2 card.</string>
+
+    <string name="widget_today_hybrid_label">Today &amp; Next Hours</string>
+    <string name="widget_today_hybrid_desc">Today weather summary alongside your upcoming 4-hour forecast.</string>
+
+    <string name="widget_hourly_forecast_label">Hourly Forecast</string>
+    <string name="widget_hourly_forecast_desc">6-hour forecast timeline with continuous temperature curve.</string>
+
+    <string name="widget_daily_forecast_label">5-Day Forecast</string>
+    <string name="widget_daily_forecast_desc">Today summary and 5-day outlook with thermal range bars.</string>
+</resources>
