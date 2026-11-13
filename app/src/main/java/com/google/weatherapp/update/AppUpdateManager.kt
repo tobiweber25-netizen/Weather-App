@@ -29,10 +29,16 @@ class AppUpdateManager(private val context: Context) {
 
     suspend fun checkForUpdates(
         owner: String = BuildConfig.GITHUB_REPO_OWNER,
-        repo: String = BuildConfig.GITHUB_REPO_NAME
+        repo: String = BuildConfig.GITHUB_REPO_NAME,
+        forceUpdate: Boolean = false
     ): UpdateCheckState = withContext(Dispatchers.IO) {
+        val currentVersion = BuildConfig.VERSION_NAME
         if (owner.isBlank() || repo.isBlank()) {
-            return@withContext UpdateCheckState.Error("GitHub repository owner or name not configured.")
+            return@withContext if (forceUpdate) {
+                createMockUpdateState(currentVersion)
+            } else {
+                UpdateCheckState.Error("GitHub repository owner or name not configured.")
+            }
         }
 
         val url = "https://api.github.com/repos/$owner/$repo/releases/latest"
@@ -48,8 +54,11 @@ class AppUpdateManager(private val context: Context) {
         try {
             val response = httpClient.newCall(requestBuilder.build()).execute()
             if (!response.isSuccessful) {
+                if (forceUpdate) {
+                    return@withContext createMockUpdateState(currentVersion)
+                }
                 return@withContext if (response.code == 404) {
-                    UpdateCheckState.UpToDate(BuildConfig.VERSION_NAME)
+                    UpdateCheckState.UpToDate(currentVersion)
                 } else {
                     UpdateCheckState.Error("GitHub API returned error ${response.code}: ${response.message}")
                 }
@@ -57,33 +66,62 @@ class AppUpdateManager(private val context: Context) {
 
             val bodyString = response.body?.string().orEmpty()
             if (bodyString.isBlank()) {
+                if (forceUpdate) {
+                    return@withContext createMockUpdateState(currentVersion)
+                }
                 return@withContext UpdateCheckState.Error("Empty response from GitHub Releases.")
             }
 
             val release = gson.fromJson(bodyString, GitHubRelease::class.java)
-            val currentVersion = BuildConfig.VERSION_NAME
             val isNewer = isNewerVersion(release.tagName, currentVersion)
 
-            if (!isNewer) {
+            if (!isNewer && !forceUpdate) {
                 return@withContext UpdateCheckState.UpToDate(currentVersion)
             }
 
             // Look for APK asset
             val apkAsset = release.assets.firstOrNull { it.name.endsWith(".apk", ignoreCase = true) }
             if (apkAsset == null) {
+                if (forceUpdate) {
+                    return@withContext createMockUpdateState(currentVersion)
+                }
                 return@withContext UpdateCheckState.Error("Release ${release.tagName} found, but no .apk asset attached.")
+            }
+
+            val targetVersion = if (isNewer) {
+                release.tagName.removePrefix("v").removePrefix("V")
+            } else {
+                "${release.tagName.removePrefix("v").removePrefix("V")} (OTA Test)"
+            }
+
+            val title = if (isNewer) {
+                release.name ?: release.tagName
+            } else {
+                (release.name ?: release.tagName) + " [OTA Test]"
+            }
+
+            val notes = if (isNewer) {
+                release.body.orEmpty()
+            } else {
+                release.body.orEmpty().ifBlank {
+                    "Easter Egg OTA Test Mode.\n\n• Target release: ${release.tagName}\n• Asset: ${apkAsset.name}\n• Verifies OTA download pipeline, progress tracking, and package installer handoff."
+                }
             }
 
             UpdateCheckState.UpdateAvailable(
                 currentVersion = currentVersion,
-                newVersion = release.tagName.removePrefix("v").removePrefix("V"),
-                releaseTitle = release.name ?: release.tagName,
-                releaseNotes = release.body.orEmpty(),
+                newVersion = targetVersion,
+                releaseTitle = title,
+                releaseNotes = notes,
                 downloadUrl = apkAsset.downloadUrl,
                 assetSize = apkAsset.size
             )
         } catch (e: Exception) {
-            UpdateCheckState.Error(e.message ?: "Failed to check for updates.")
+            if (forceUpdate) {
+                createMockUpdateState(currentVersion)
+            } else {
+                UpdateCheckState.Error(e.message ?: "Failed to check for updates.")
+            }
         }
     }
 
@@ -91,6 +129,9 @@ class AppUpdateManager(private val context: Context) {
         downloadUrl: String,
         onProgress: (Float, Long, Long) -> Unit
     ): Result<File> = withContext(Dispatchers.IO) {
+        if (downloadUrl == MOCK_DOWNLOAD_URL) {
+            return@withContext simulateApkDownload(onProgress)
+        }
         try {
             val requestBuilder = Request.Builder()
                 .url(downloadUrl)
@@ -164,7 +205,65 @@ class AppUpdateManager(private val context: Context) {
         context.startActivity(intent)
     }
 
+    internal fun createMockUpdateState(currentVersion: String): UpdateCheckState.UpdateAvailable {
+        val baseApk = File(context.applicationInfo.sourceDir)
+        val apkSize = if (baseApk.exists() && baseApk.length() > 0) baseApk.length() else 14_242_447L
+        return UpdateCheckState.UpdateAvailable(
+            currentVersion = currentVersion,
+            newVersion = "$currentVersion (OTA Test)",
+            releaseTitle = "Almanac OTA Test Build",
+            releaseNotes = "Easter Egg OTA Simulation Mode.\n\n• Simulated APK download with live progress\n• Validates download UX, progress indicator, and PackageInstaller handoff.",
+            downloadUrl = MOCK_DOWNLOAD_URL,
+            assetSize = apkSize
+        )
+    }
+
+    private suspend fun simulateApkDownload(
+        onProgress: (Float, Long, Long) -> Unit
+    ): Result<File> = withContext(Dispatchers.IO) {
+        try {
+            val updatesDir = File(context.cacheDir, "updates").apply { if (!exists()) mkdirs() }
+            val destinationFile = File(updatesDir, "update.apk")
+            if (destinationFile.exists()) destinationFile.delete()
+
+            val baseApk = File(context.applicationInfo.sourceDir)
+            if (baseApk.exists() && baseApk.length() > 0) {
+                val totalBytes = baseApk.length()
+                baseApk.inputStream().use { input ->
+                    FileOutputStream(destinationFile).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        var bytesRead: Int
+                        var totalRead = 0L
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                            val progress = if (totalBytes > 0) totalRead.toFloat() / totalBytes else 0f
+                            onProgress(progress, totalRead, totalBytes)
+                            kotlinx.coroutines.delay(5)
+                        }
+                        output.flush()
+                    }
+                }
+            } else {
+                val simulatedTotal = 14_242_447L
+                val steps = 25
+                for (i in 1..steps) {
+                    kotlinx.coroutines.delay(40)
+                    val progress = i.toFloat() / steps
+                    val read = (progress * simulatedTotal).toLong()
+                    onProgress(progress, read, simulatedTotal)
+                }
+                destinationFile.writeBytes("OTA Test Fallback APK Content".toByteArray())
+            }
+            Result.success(destinationFile)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     companion object {
+        const val MOCK_DOWNLOAD_URL = "mock://ota-test-package"
+
         internal fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean {
             val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V")
             val cleanCurrent = currentVersion.trim().removePrefix("v").removePrefix("V")

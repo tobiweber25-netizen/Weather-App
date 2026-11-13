@@ -57,11 +57,10 @@ jobs:
       - name: Find and Rename Release APK
         run: |
           mkdir -p release-artifacts
-          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          APK_PATH=$(find app/build/outputs/apk/release -name "*release.apk" ! -name "*unsigned*" | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "Release APK not found! Checking debug APK fallback..."
-            ./gradlew assembleDebug
-            APK_PATH=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+            echo "Signed release APK not found! Checking fallback..."
+            APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           fi
           echo "Using APK at: $APK_PATH"
           cp "$APK_PATH" release-artifacts/weather-app-release.apk

@@ -39,10 +39,10 @@ android {
 
     signingConfigs {
         create("release") {
-            storeFile = file("release.keystore")
-            storePassword = "weatherapp_ota_key"
-            keyAlias = "weatherapp"
-            keyPassword = "weatherapp_ota_key"
+            storeFile = file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
         }
     }
 

@@ -1,6 +1,7 @@
 package com.google.weatherapp.ui
 
 import android.Manifest
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
@@ -8,6 +9,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -74,6 +77,8 @@ fun WeatherScreen(
     var updateDownloadState by remember { mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle) }
     var showUpdateDialog by remember { mutableStateOf(false) }
     var downloadedApkFile by remember { mutableStateOf<java.io.File?>(null) }
+    var easterEggTapCount by remember { mutableIntStateOf(0) }
+    var lastEasterEggTapTime by remember { mutableLongStateOf(0L) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -182,7 +187,42 @@ fun WeatherScreen(
                     title = {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
+                            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(CornerTokens.Small))
+                                .clickable(
+                                    indication = null,
+                                    interactionSource = remember { MutableInteractionSource() }
+                                ) {
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastEasterEggTapTime > 2000L) {
+                                        easterEggTapCount = 1
+                                    } else {
+                                        easterEggTapCount++
+                                    }
+                                    lastEasterEggTapTime = now
+
+                                    if (easterEggTapCount in 3..4) {
+                                        Toast.makeText(
+                                            context,
+                                            "${5 - easterEggTapCount} taps to test OTA updates",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    } else if (easterEggTapCount >= 5) {
+                                        easterEggTapCount = 0
+                                        Toast.makeText(
+                                            context,
+                                            "OTA Update Test Mode Activated!",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                        showUpdateDialog = true
+                                        updateCheckState = UpdateCheckState.Checking
+                                        updateDownloadState = UpdateDownloadState.Idle
+                                        coroutineScope.launch {
+                                            updateCheckState = updateManager.checkForUpdates(forceUpdate = true)
+                                        }
+                                    }
+                                }
                         ) {
                             Text(
                                 text = "Almanac",
@@ -476,6 +516,13 @@ fun WeatherScreen(
                         onDismiss = {
                             showUpdateDialog = false
                             updateDownloadState = UpdateDownloadState.Idle
+                        },
+                        onForceUpdateCheck = {
+                            updateCheckState = UpdateCheckState.Checking
+                            updateDownloadState = UpdateDownloadState.Idle
+                            coroutineScope.launch {
+                                updateCheckState = updateManager.checkForUpdates(forceUpdate = true)
+                            }
                         },
                         onStartDownload = { url ->
                             coroutineScope.launch {

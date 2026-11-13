@@ -1,7 +1,10 @@
 package com.google.weatherapp.ui.components
 
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -15,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.window.Dialog
@@ -31,7 +35,8 @@ fun UpdateDialog(
     onDismiss: () -> Unit,
     onStartDownload: (String) -> Unit,
     onRequestInstallPermission: () -> Unit,
-    onInstallApk: () -> Unit
+    onInstallApk: () -> Unit,
+    onForceUpdateCheck: (() -> Unit)? = null
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -82,7 +87,8 @@ fun UpdateDialog(
                     checkState is UpdateCheckState.UpToDate -> {
                         UpToDateContent(
                             currentVersion = checkState.currentVersion,
-                            onDismiss = onDismiss
+                            onDismiss = onDismiss,
+                            onForceUpdateCheck = onForceUpdateCheck
                         )
                     }
                     checkState is UpdateCheckState.Error -> {
@@ -124,8 +130,12 @@ private fun CheckingContent() {
 @Composable
 private fun UpToDateContent(
     currentVersion: String,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onForceUpdateCheck: (() -> Unit)? = null
 ) {
+    var tapCount by remember { mutableIntStateOf(0) }
+    val context = LocalContext.current
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(SpacingTokens.Base)
@@ -134,7 +144,29 @@ private fun UpToDateContent(
             imageVector = Icons.Default.Verified,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(IconSizeTokens.ExtraLarge)
+            modifier = Modifier
+                .size(IconSizeTokens.ExtraLarge)
+                .clickable(
+                    indication = null,
+                    interactionSource = remember { MutableInteractionSource() }
+                ) {
+                    tapCount++
+                    if (tapCount in 1..2) {
+                        Toast.makeText(
+                            context,
+                            "${3 - tapCount} taps to force OTA test",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else if (tapCount >= 3) {
+                        tapCount = 0
+                        Toast.makeText(
+                            context,
+                            "OTA Test Triggered!",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        onForceUpdateCheck?.invoke()
+                    }
+                }
         )
         Text(
             text = "You're up to date!",
@@ -146,7 +178,28 @@ private fun UpToDateContent(
             text = "Weather App v$currentVersion is currently the newest version available.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.clickable(
+                indication = null,
+                interactionSource = remember { MutableInteractionSource() }
+            ) {
+                tapCount++
+                if (tapCount in 1..2) {
+                    Toast.makeText(
+                        context,
+                        "${3 - tapCount} taps to force OTA test",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else if (tapCount >= 3) {
+                    tapCount = 0
+                    Toast.makeText(
+                        context,
+                        "OTA Test Triggered!",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    onForceUpdateCheck?.invoke()
+                }
+            }
         )
         Spacer(modifier = Modifier.height(SpacingTokens.Small))
         Button(
