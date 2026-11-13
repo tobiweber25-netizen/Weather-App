@@ -54,6 +54,9 @@ class AppUpdateManager(private val context: Context) {
         try {
             val response = httpClient.newCall(requestBuilder.build()).execute()
             if (!response.isSuccessful) {
+                if (response.code == 403 || response.code == 429) {
+                    return@withContext checkViaWebRedirect(owner, repo, currentVersion)
+                }
                 if (forceUpdate) {
                     return@withContext createMockUpdateState(currentVersion)
                 }
@@ -191,6 +194,48 @@ class AppUpdateManager(private val context: Context) {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             context.startActivity(intent)
+        }
+    }
+
+    private suspend fun checkViaWebRedirect(
+        owner: String,
+        repo: String,
+        currentVersion: String
+    ): UpdateCheckState = withContext(Dispatchers.IO) {
+        try {
+            val webUrl = "https://github.com/$owner/$repo/releases/latest"
+            val request = Request.Builder()
+                .url(webUrl)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
+                .build()
+
+            val response = httpClient.newCall(request).execute()
+            val effectiveUrl = response.request.url.toString()
+
+            if (!effectiveUrl.contains("/releases/tag/")) {
+                return@withContext UpdateCheckState.Error("API rate limit hit and unable to resolve release via web.")
+            }
+
+            val tagName = effectiveUrl.substringAfterLast("/releases/tag/").trim()
+            val isNewer = isNewerVersion(tagName, currentVersion)
+
+            if (!isNewer) {
+                return@withContext UpdateCheckState.UpToDate(currentVersion)
+            }
+
+            val cleanNewVersion = tagName.removePrefix("v").removePrefix("V")
+            val downloadUrl = "https://github.com/$owner/$repo/releases/download/$tagName/weather-app-release.apk"
+
+            UpdateCheckState.UpdateAvailable(
+                currentVersion = currentVersion,
+                newVersion = cleanNewVersion,
+                releaseTitle = "Weather App $tagName",
+                releaseNotes = "New release $tagName is available on GitHub.",
+                downloadUrl = downloadUrl,
+                assetSize = 14_242_447L
+            )
+        } catch (e: Exception) {
+            UpdateCheckState.Error("API rate limit exceeded and web fallback failed: ${e.message}")
         }
     }
 
