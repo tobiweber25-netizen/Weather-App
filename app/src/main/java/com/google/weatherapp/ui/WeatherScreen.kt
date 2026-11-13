@@ -232,6 +232,26 @@ fun WeatherScreen(
                                 fontWeight = FontWeight.Normal,
                                 color = SkyTextPrimary
                             )
+                            Surface(
+                                shape = RoundedCornerShape(CornerTokens.Pill),
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
+                                border = BorderStroke(BorderTokens.Hairline, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
+                                modifier = Modifier.clickable {
+                                    Toast.makeText(
+                                        context,
+                                        "🎉 OTA Update Successful! Running v1.0.1 wirelessly 🚀",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            ) {
+                                Text(
+                                    text = "v1.0.1 🚀",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = SpacingTokens.Small, vertical = SpacingTokens.ExtraSmall)
+                                )
+                            }
                             if (activeEffectOverride != null) {
                                 Surface(
                                     color = GlassCardBackgroundDark,
