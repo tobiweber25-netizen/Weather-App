@@ -371,6 +371,11 @@ fun EveningForecastSheet(
                     onCheckedChange = {
                         morningEnabled = it
                         notificationPrefs.isMorningBriefingEnabled = it
+                        if (it) {
+                            WeatherNotificationScheduler.scheduleMorning(context)
+                        } else {
+                            WeatherNotificationScheduler.cancelMorning(context)
+                        }
                     }
                 )
 
@@ -385,6 +390,11 @@ fun EveningForecastSheet(
                     onCheckedChange = {
                         eveningEnabled = it
                         notificationPrefs.isEveningOutlookEnabled = it
+                        if (it) {
+                            WeatherNotificationScheduler.scheduleEvening(context)
+                        } else {
+                            WeatherNotificationScheduler.cancelEvening(context)
+                        }
                     }
                 )
 

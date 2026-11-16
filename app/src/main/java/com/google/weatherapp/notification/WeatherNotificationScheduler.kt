@@ -206,15 +206,12 @@ object WeatherNotificationScheduler {
         val prefs = NotificationPreferences(appContext)
         if (!prefs.isWeatherNotificationsEnabled) return
 
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .build()
-
+        // Do not gate the periodic watchdog/catch-up on NetworkType.CONNECTED:
+        // Doze/offline states would otherwise block ensureAlarmsScheduled() and catch-up delivery.
         val periodicWork = PeriodicWorkRequestBuilder<WeatherNotificationWorker>(
             15, TimeUnit.MINUTES,
             5, TimeUnit.MINUTES
         )
-            .setConstraints(constraints)
             .setInputData(workDataOf(WeatherNotificationWorker.KEY_NOTIFICATION_TYPE to WeatherNotificationWorker.TYPE_PERIODIC_CHECK))
             .addTag(UNIQUE_WORK_PERIODIC)
             .build()
@@ -222,7 +219,7 @@ object WeatherNotificationScheduler {
         try {
             WorkManager.getInstance(appContext).enqueueUniquePeriodicWork(
                 UNIQUE_WORK_PERIODIC,
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 periodicWork
             )
         } catch (_: Exception) {
@@ -231,6 +228,45 @@ object WeatherNotificationScheduler {
     }
 
     fun schedulePeriodicCheck(context: Context) = schedulePeriodicSync(context)
+
+    fun enqueueImmediateBriefing(context: Context, type: String) {
+        val appContext = context.applicationContext
+        val workRequest = OneTimeWorkRequestBuilder<WeatherNotificationWorker>()
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            .setInputData(workDataOf(WeatherNotificationWorker.KEY_NOTIFICATION_TYPE to type))
+            .build()
+
+        val uniqueName = if (type == WeatherNotificationWorker.TYPE_MORNING) UNIQUE_WORK_MORNING else UNIQUE_WORK_EVENING
+        try {
+            WorkManager.getInstance(appContext).enqueueUniqueWork(
+                uniqueName,
+                ExistingWorkPolicy.REPLACE,
+                workRequest
+            )
+        } catch (_: Exception) {
+            // Ignore
+        }
+    }
+
+    fun cancelMorning(context: Context) {
+        val appContext = context.applicationContext
+        val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        try {
+            createMorningPendingIntent(appContext)?.let { alarmManager.cancel(it) }
+        } catch (_: Throwable) {
+            // Ignore
+        }
+    }
+
+    fun cancelEvening(context: Context) {
+        val appContext = context.applicationContext
+        val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        try {
+            createEveningPendingIntent(appContext)?.let { alarmManager.cancel(it) }
+        } catch (_: Throwable) {
+            // Ignore
+        }
+    }
 
     fun enqueueBackgroundSync(context: Context) {
         val appContext = context.applicationContext
@@ -580,7 +616,7 @@ object WeatherNotificationScheduler {
         }
     }
 
-    private fun isForToday(data: WeatherDashboardData): Boolean {
+    internal fun isForToday(data: WeatherDashboardData): Boolean {
         val first = data.dailyList.firstOrNull()?.dateText ?: return false
         val zone = try {
             if (!data.timezone.isNullOrBlank()) ZoneId.of(data.timezone) else ZoneId.systemDefault()

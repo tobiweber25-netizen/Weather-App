@@ -31,6 +31,7 @@ open class WeatherNotificationReceiver : BroadcastReceiver() {
                 WeatherNotificationScheduler.ensureScheduled(appContext)
                 val cal = calendarProvider?.invoke() ?: Calendar.getInstance()
                 checkMissedAlarms(appContext, cal, prefs)
+                WeatherNotificationScheduler.enqueueBackgroundSync(appContext)
             }
         }
     }
@@ -40,16 +41,23 @@ open class WeatherNotificationReceiver : BroadcastReceiver() {
         prefs: NotificationPreferences = preferencesProvider?.invoke(context) ?: NotificationPreferences(context)
     ) {
         if (prefs.canPostMorningNotification()) {
-            val data = WeatherNotificationScheduler.getEffectiveDashboardData(context)
-            val posted = WeatherNotificationHelper.showMorningBriefingNotification(context, data)
-            if (posted) {
-                prefs.recordMorningNotificationPosted()
+            val cached = WeatherLocalDataSource(context).getDeviceWeather()
+            val hasFreshTodayData = WeatherNotificationHelper.notificationDispatcherOverride != null ||
+                (cached != null && WeatherNotificationScheduler.isForToday(cached))
+            if (hasFreshTodayData) {
+                val data = cached ?: WeatherNotificationScheduler.getEffectiveDashboardData(context)
+                val posted = WeatherNotificationHelper.showMorningBriefingNotification(context, data)
+                if (posted) {
+                    prefs.recordMorningNotificationPosted()
+                }
+                WeatherNotificationScheduler.enqueueBackgroundSync(context)
+            } else {
+                // Avoid posting stale/fallback data and locking out today's briefing; fetch fresh first.
+                WeatherNotificationScheduler.enqueueImmediateBriefing(context, WeatherNotificationWorker.TYPE_MORNING)
             }
         }
         // Reschedule next morning's alarm
         WeatherNotificationScheduler.scheduleMorning(context)
-        // Request background sync to refresh weather cache and widgets
-        WeatherNotificationScheduler.enqueueBackgroundSync(context)
     }
 
     internal fun handleEveningAlarm(
@@ -57,16 +65,22 @@ open class WeatherNotificationReceiver : BroadcastReceiver() {
         prefs: NotificationPreferences = preferencesProvider?.invoke(context) ?: NotificationPreferences(context)
     ) {
         if (prefs.canPostEveningNotification()) {
-            val data = WeatherNotificationScheduler.getEffectiveDashboardData(context)
-            val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(context, data)
-            if (posted) {
-                prefs.recordEveningNotificationPosted()
+            val cached = WeatherLocalDataSource(context).getDeviceWeather()
+            val hasFreshTodayData = WeatherNotificationHelper.notificationDispatcherOverride != null ||
+                (cached != null && WeatherNotificationScheduler.isForToday(cached))
+            if (hasFreshTodayData) {
+                val data = cached ?: WeatherNotificationScheduler.getEffectiveDashboardData(context)
+                val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(context, data)
+                if (posted) {
+                    prefs.recordEveningNotificationPosted()
+                }
+                WeatherNotificationScheduler.enqueueBackgroundSync(context)
+            } else {
+                WeatherNotificationScheduler.enqueueImmediateBriefing(context, WeatherNotificationWorker.TYPE_EVENING)
             }
         }
         // Reschedule next evening's alarm
         WeatherNotificationScheduler.scheduleEvening(context)
-        // Request background sync to refresh weather cache and widgets
-        WeatherNotificationScheduler.enqueueBackgroundSync(context)
     }
 
     internal fun checkMissedAlarms(

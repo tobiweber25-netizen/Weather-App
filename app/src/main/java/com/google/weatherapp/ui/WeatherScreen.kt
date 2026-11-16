@@ -107,7 +107,11 @@ fun WeatherScreen(
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED
             if (!notifGranted && notificationPrefs.isWeatherNotificationsEnabled) {
                 permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+            } else if (notifGranted && notificationPrefs.isWeatherNotificationsEnabled) {
+                com.google.weatherapp.notification.WeatherNotificationScheduler.ensureScheduled(context)
             }
+        } else if (notificationPrefs.isWeatherNotificationsEnabled) {
+            com.google.weatherapp.notification.WeatherNotificationScheduler.ensureScheduled(context)
         }
         if (permissionsToRequest.isNotEmpty()) {
             permissionLauncher.launch(permissionsToRequest.toTypedArray())

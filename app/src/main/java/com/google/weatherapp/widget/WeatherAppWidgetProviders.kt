@@ -125,7 +125,8 @@ object WeatherWidgetUpdater {
                 } else {
                     val fallbackCity = repo.getSavedLocations().firstOrNull()
                     if (fallbackCity != null) {
-                        repo.getWeatherData(
+                        // Do not overwrite deviceWeather with a fallback saved city when GPS is unavailable.
+                        WeatherRepository(localDataSource = null).getWeatherData(
                             latitude = fallbackCity.latitude,
                             longitude = fallbackCity.longitude,
                             resolvedLocationName = fallbackCity.name
