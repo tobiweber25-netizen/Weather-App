@@ -244,26 +244,6 @@ fun WeatherScreen(
                                 fontWeight = FontWeight.Normal,
                                 color = SkyTextPrimary
                             )
-                            Surface(
-                                shape = RoundedCornerShape(CornerTokens.Pill),
-                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
-                                border = BorderStroke(BorderTokens.Hairline, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)),
-                                modifier = Modifier.clickable {
-                                    Toast.makeText(
-                                        context,
-                                        "Almanac v${com.google.weatherapp.BuildConfig.VERSION_NAME} (Code ${com.google.weatherapp.BuildConfig.VERSION_CODE})",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                }
-                            ) {
-                                Text(
-                                    text = "v${com.google.weatherapp.BuildConfig.VERSION_NAME}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.padding(horizontal = SpacingTokens.Small, vertical = SpacingTokens.ExtraSmall)
-                                )
-                            }
                             if (activeEffectOverride != null) {
                                 Surface(
                                     color = GlassCardBackgroundDark,
@@ -502,7 +482,33 @@ fun WeatherScreen(
                                 }
                             }
                             item {
-                                Spacer(modifier = Modifier.height(SpacingTokens.Huge))
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(top = SpacingTokens.Base, bottom = SpacingTokens.Huge),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(CornerTokens.Pill),
+                                        color = GlassCardBackgroundDark,
+                                        border = BorderStroke(BorderTokens.Hairline, GlassCardBorderLight),
+                                        modifier = Modifier.clickable {
+                                            Toast.makeText(
+                                                context,
+                                                "Almanac v${com.google.weatherapp.BuildConfig.VERSION_NAME} (Code ${com.google.weatherapp.BuildConfig.VERSION_CODE})",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "v${com.google.weatherapp.BuildConfig.VERSION_NAME}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = SkyTextSecondary,
+                                            modifier = Modifier.padding(horizontal = SpacingTokens.Medium, vertical = SpacingTokens.ExtraSmall)
+                                        )
+                                    }
+                                }
                             }
                         }
 
