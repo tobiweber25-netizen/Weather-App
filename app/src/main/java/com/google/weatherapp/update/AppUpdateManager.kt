@@ -52,9 +52,18 @@ class AppUpdateManager(private val context: Context) {
         }
 
         try {
-            val response = httpClient.newCall(requestBuilder.build()).execute()
+            var response = httpClient.newCall(requestBuilder.build()).execute()
+            if (response.code == 401 && BuildConfig.GITHUB_TOKEN.isNotBlank()) {
+                response.close()
+                val unauthRequest = Request.Builder()
+                    .url(url)
+                    .header("Accept", "application/vnd.github.v3+json")
+                    .header("User-Agent", "WeatherApp-Android")
+                    .build()
+                response = httpClient.newCall(unauthRequest).execute()
+            }
             if (!response.isSuccessful) {
-                if (response.code == 403 || response.code == 429) {
+                if (response.code == 401 || response.code == 403 || response.code == 429) {
                     return@withContext checkViaWebRedirect(owner, repo, currentVersion)
                 }
                 if (forceUpdate) {
@@ -145,7 +154,16 @@ class AppUpdateManager(private val context: Context) {
                 requestBuilder.header("Authorization", "Bearer ${BuildConfig.GITHUB_TOKEN}")
             }
 
-            val response = httpClient.newCall(requestBuilder.build()).execute()
+            var response = httpClient.newCall(requestBuilder.build()).execute()
+            if (response.code == 401 && BuildConfig.GITHUB_TOKEN.isNotBlank()) {
+                response.close()
+                val unauthRequest = Request.Builder()
+                    .url(downloadUrl)
+                    .header("Accept", "application/octet-stream")
+                    .header("User-Agent", "WeatherApp-Android")
+                    .build()
+                response = httpClient.newCall(unauthRequest).execute()
+            }
             if (!response.isSuccessful) {
                 return@withContext Result.failure(Exception("Failed to download APK: HTTP ${response.code}"))
             }

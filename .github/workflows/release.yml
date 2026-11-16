@@ -44,9 +44,6 @@ jobs:
           if [ -n "${{ secrets.GEMINI_API_KEY }}" ]; then
             echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" >> local.properties
           fi
-          if [ -n "${{ secrets.GITHUB_TOKEN }}" ]; then
-            echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> local.properties
-          fi
 
       - name: Grant Execute Permission for Gradlew
         run: chmod +x gradlew
