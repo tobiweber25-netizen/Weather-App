@@ -118,6 +118,14 @@ fun WeatherScreen(
         }
     }
 
+    LaunchedEffect(Unit) {
+        val result = updateManager.checkForUpdates(forceUpdate = false)
+        if (result is UpdateCheckState.UpdateAvailable && !showUpdateDialog) {
+            updateCheckState = result
+            showUpdateDialog = true
+        }
+    }
+
     var activeEffectOverride by remember { mutableStateOf<WeatherEffectType?>(null) }
 
     val defaultEffect = remember { getDefaultWeatherEffect() }
@@ -243,13 +251,13 @@ fun WeatherScreen(
                                 modifier = Modifier.clickable {
                                     Toast.makeText(
                                         context,
-                                        "🎉 OTA Update Successful! Running v1.0.1 wirelessly 🚀",
+                                        "Almanac v${com.google.weatherapp.BuildConfig.VERSION_NAME} (Code ${com.google.weatherapp.BuildConfig.VERSION_CODE})",
                                         Toast.LENGTH_LONG
                                     ).show()
                                 }
                             ) {
                                 Text(
-                                    text = "v1.0.1 🚀",
+                                    text = "v${com.google.weatherapp.BuildConfig.VERSION_NAME}",
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onPrimaryContainer,

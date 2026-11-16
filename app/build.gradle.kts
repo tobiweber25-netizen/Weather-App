@@ -22,8 +22,8 @@ android {
         applicationId = "com.google.weatherapp"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.3"
+        versionCode = 5
+        versionName = "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -34,10 +34,15 @@ android {
         buildConfigField("String", "GEMINI_API_KEY", "\"${localProperties.getProperty("GEMINI_API_KEY") ?: ""}\"")
         buildConfigField("String", "GITHUB_REPO_OWNER", "\"${localProperties.getProperty("GITHUB_REPO_OWNER") ?: "tobiweber25-netizen"}\"")
         buildConfigField("String", "GITHUB_REPO_NAME", "\"${localProperties.getProperty("GITHUB_REPO_NAME") ?: "Weather-App"}\"")
-        buildConfigField("String", "GITHUB_TOKEN", "\"${localProperties.getProperty("GITHUB_TOKEN") ?: ""}\"")
     }
 
     signingConfigs {
+        getByName("debug") {
+            storeFile = file("keystore/debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
         create("release") {
             storeFile = file("keystore/debug.keystore")
             storePassword = "android"
@@ -57,16 +62,17 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_21
-        targetCompatibility = JavaVersion.VERSION_21
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = "21"
+        jvmTarget = "17"
     }
 
     buildFeatures {

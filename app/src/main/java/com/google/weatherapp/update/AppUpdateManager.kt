@@ -41,99 +41,106 @@ class AppUpdateManager(private val context: Context) {
             }
         }
 
-        val url = "https://api.github.com/repos/$owner/$repo/releases/latest"
-        val requestBuilder = Request.Builder()
-            .url(url)
-            .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "WeatherApp-Android")
-
-        if (BuildConfig.GITHUB_TOKEN.isNotBlank()) {
-            requestBuilder.header("Authorization", "Bearer ${BuildConfig.GITHUB_TOKEN}")
+        // Tier 1: CDN-served ota-metadata.json (zero GitHub API rate limits, zero tokens)
+        checkViaMetadataAsset(owner, repo, currentVersion, forceUpdate)?.let {
+            return@withContext it
         }
 
+        // Tier 2: Unauthenticated GitHub Releases REST API fallback
+        val url = "https://api.github.com/repos/$owner/$repo/releases/latest"
+        val request = Request.Builder()
+            .url(url)
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", USER_AGENT)
+            .build()
+
         try {
-            var response = httpClient.newCall(requestBuilder.build()).execute()
-            if (response.code == 401 && BuildConfig.GITHUB_TOKEN.isNotBlank()) {
-                response.close()
-                val unauthRequest = Request.Builder()
-                    .url(url)
-                    .header("Accept", "application/vnd.github.v3+json")
-                    .header("User-Agent", "WeatherApp-Android")
-                    .build()
-                response = httpClient.newCall(unauthRequest).execute()
-            }
-            if (!response.isSuccessful) {
-                if (response.code == 401 || response.code == 403 || response.code == 429) {
-                    return@withContext checkViaWebRedirect(owner, repo, currentVersion)
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    if (response.code == 401 || response.code == 403 || response.code == 429) {
+                        return@withContext checkViaWebRedirect(owner, repo, currentVersion, forceUpdate)
+                    }
+                    if (forceUpdate) {
+                        return@withContext createMockUpdateState(currentVersion)
+                    }
+                    return@withContext if (response.code == 404) {
+                        UpdateCheckState.UpToDate(currentVersion)
+                    } else {
+                        UpdateCheckState.Error("GitHub API returned error ${response.code}: ${response.message}")
+                    }
                 }
-                if (forceUpdate) {
-                    return@withContext createMockUpdateState(currentVersion)
+
+                val bodyString = response.body?.string().orEmpty()
+                if (bodyString.isBlank()) {
+                    if (forceUpdate) {
+                        return@withContext createMockUpdateState(currentVersion)
+                    }
+                    return@withContext UpdateCheckState.Error("Empty response from GitHub Releases.")
                 }
-                return@withContext if (response.code == 404) {
-                    UpdateCheckState.UpToDate(currentVersion)
-                } else {
-                    UpdateCheckState.Error("GitHub API returned error ${response.code}: ${response.message}")
+
+                val release = gson.fromJson(bodyString, GitHubRelease::class.java)
+                val isNewer = isNewerVersion(release.tagName, currentVersion)
+
+                if (!isNewer && !forceUpdate) {
+                    return@withContext UpdateCheckState.UpToDate(currentVersion)
                 }
-            }
 
-            val bodyString = response.body?.string().orEmpty()
-            if (bodyString.isBlank()) {
-                if (forceUpdate) {
-                    return@withContext createMockUpdateState(currentVersion)
+                val apkAsset = release.assets.firstOrNull { it.name.endsWith(".apk", ignoreCase = true) }
+                if (apkAsset == null) {
+                    if (forceUpdate) {
+                        return@withContext createMockUpdateState(currentVersion)
+                    }
+                    return@withContext UpdateCheckState.Error("Release ${release.tagName} found, but no .apk asset attached.")
                 }
-                return@withContext UpdateCheckState.Error("Empty response from GitHub Releases.")
+
+                buildUpdateAvailable(
+                    currentVersion = currentVersion,
+                    remoteVersion = release.tagName.removePrefix("v").removePrefix("V"),
+                    rawTitle = release.name ?: release.tagName,
+                    rawNotes = release.body.orEmpty(),
+                    downloadUrl = apkAsset.downloadUrl,
+                    assetSize = apkAsset.size,
+                    assetName = apkAsset.name,
+                    tagName = release.tagName,
+                    isNewer = isNewer
+                )
             }
-
-            val release = gson.fromJson(bodyString, GitHubRelease::class.java)
-            val isNewer = isNewerVersion(release.tagName, currentVersion)
-
-            if (!isNewer && !forceUpdate) {
-                return@withContext UpdateCheckState.UpToDate(currentVersion)
-            }
-
-            // Look for APK asset
-            val apkAsset = release.assets.firstOrNull { it.name.endsWith(".apk", ignoreCase = true) }
-            if (apkAsset == null) {
-                if (forceUpdate) {
-                    return@withContext createMockUpdateState(currentVersion)
-                }
-                return@withContext UpdateCheckState.Error("Release ${release.tagName} found, but no .apk asset attached.")
-            }
-
-            val targetVersion = if (isNewer) {
-                release.tagName.removePrefix("v").removePrefix("V")
-            } else {
-                "${release.tagName.removePrefix("v").removePrefix("V")} (OTA Test)"
-            }
-
-            val title = if (isNewer) {
-                release.name ?: release.tagName
-            } else {
-                (release.name ?: release.tagName) + " [OTA Test]"
-            }
-
-            val notes = if (isNewer) {
-                release.body.orEmpty()
-            } else {
-                release.body.orEmpty().ifBlank {
-                    "Easter Egg OTA Test Mode.\n\n• Target release: ${release.tagName}\n• Asset: ${apkAsset.name}\n• Verifies OTA download pipeline, progress tracking, and package installer handoff."
-                }
-            }
-
-            UpdateCheckState.UpdateAvailable(
-                currentVersion = currentVersion,
-                newVersion = targetVersion,
-                releaseTitle = title,
-                releaseNotes = notes,
-                downloadUrl = apkAsset.downloadUrl,
-                assetSize = apkAsset.size
-            )
         } catch (e: Exception) {
             if (forceUpdate) {
                 createMockUpdateState(currentVersion)
             } else {
                 UpdateCheckState.Error(e.message ?: "Failed to check for updates.")
             }
+        }
+    }
+
+    private fun checkViaMetadataAsset(
+        owner: String,
+        repo: String,
+        currentVersion: String,
+        forceUpdate: Boolean
+    ): UpdateCheckState? {
+        val metadataUrl = "https://github.com/$owner/$repo/releases/latest/download/$OTA_METADATA_ASSET"
+        val request = Request.Builder()
+            .url(metadataUrl)
+            .header("Accept", "application/json")
+            .header("User-Agent", USER_AGENT)
+            .build()
+
+        return try {
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                val bodyString = response.body?.string().orEmpty()
+                val metadata = parseOtaMetadata(bodyString, gson) ?: return null
+                evaluateMetadataUpdate(
+                    metadata = metadata,
+                    currentVersion = currentVersion,
+                    currentVersionCode = BuildConfig.VERSION_CODE,
+                    forceUpdate = forceUpdate
+                )
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -145,53 +152,42 @@ class AppUpdateManager(private val context: Context) {
             return@withContext simulateApkDownload(onProgress)
         }
         try {
-            val requestBuilder = Request.Builder()
+            val request = Request.Builder()
                 .url(downloadUrl)
                 .header("Accept", "application/octet-stream")
-                .header("User-Agent", "WeatherApp-Android")
+                .header("User-Agent", USER_AGENT)
+                .build()
 
-            if (BuildConfig.GITHUB_TOKEN.isNotBlank()) {
-                requestBuilder.header("Authorization", "Bearer ${BuildConfig.GITHUB_TOKEN}")
-            }
-
-            var response = httpClient.newCall(requestBuilder.build()).execute()
-            if (response.code == 401 && BuildConfig.GITHUB_TOKEN.isNotBlank()) {
-                response.close()
-                val unauthRequest = Request.Builder()
-                    .url(downloadUrl)
-                    .header("Accept", "application/octet-stream")
-                    .header("User-Agent", "WeatherApp-Android")
-                    .build()
-                response = httpClient.newCall(unauthRequest).execute()
-            }
-            if (!response.isSuccessful) {
-                return@withContext Result.failure(Exception("Failed to download APK: HTTP ${response.code}"))
-            }
-
-            val body = response.body ?: return@withContext Result.failure(Exception("Response body is empty"))
-            val totalBytes = body.contentLength()
-
-            val updatesDir = File(context.cacheDir, "updates").apply { if (!exists()) mkdirs() }
-            val destinationFile = File(updatesDir, "update.apk")
-            if (destinationFile.exists()) destinationFile.delete()
-
-            body.byteStream().use { inputStream ->
-                FileOutputStream(destinationFile).use { outputStream ->
-                    val buffer = ByteArray(8 * 1024)
-                    var bytesRead: Int
-                    var totalRead = 0L
-
-                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                        outputStream.write(buffer, 0, bytesRead)
-                        totalRead += bytesRead
-                        val progress = if (totalBytes > 0) totalRead.toFloat() / totalBytes else 0f
-                        onProgress(progress, totalRead, totalBytes)
-                    }
-                    outputStream.flush()
+            httpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    return@withContext Result.failure(Exception("Failed to download APK: HTTP ${response.code}"))
                 }
-            }
 
-            Result.success(destinationFile)
+                val body = response.body ?: return@withContext Result.failure(Exception("Response body is empty"))
+                val totalBytes = body.contentLength()
+
+                val updatesDir = File(context.cacheDir, "updates").apply { if (!exists()) mkdirs() }
+                val destinationFile = File(updatesDir, "update.apk")
+                if (destinationFile.exists()) destinationFile.delete()
+
+                body.byteStream().use { inputStream ->
+                    FileOutputStream(destinationFile).use { outputStream ->
+                        val buffer = ByteArray(8 * 1024)
+                        var bytesRead: Int
+                        var totalRead = 0L
+
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                            val progress = if (totalBytes > 0) totalRead.toFloat() / totalBytes else 0f
+                            onProgress(progress, totalRead, totalBytes)
+                        }
+                        outputStream.flush()
+                    }
+                }
+
+                Result.success(destinationFile)
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -218,7 +214,8 @@ class AppUpdateManager(private val context: Context) {
     private suspend fun checkViaWebRedirect(
         owner: String,
         repo: String,
-        currentVersion: String
+        currentVersion: String,
+        forceUpdate: Boolean
     ): UpdateCheckState = withContext(Dispatchers.IO) {
         try {
             val webUrl = "https://github.com/$owner/$repo/releases/latest"
@@ -227,33 +224,48 @@ class AppUpdateManager(private val context: Context) {
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36")
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            val effectiveUrl = response.request.url.toString()
+            httpClient.newCall(request).execute().use { response ->
+                val effectiveUrl = response.request.url.toString()
 
-            if (!effectiveUrl.contains("/releases/tag/")) {
-                return@withContext UpdateCheckState.Error("API rate limit hit and unable to resolve release via web.")
+                if (!effectiveUrl.contains("/releases/tag/")) {
+                    return@withContext if (forceUpdate) {
+                        createMockUpdateState(currentVersion)
+                    } else {
+                        UpdateCheckState.Error("API rate limit hit and unable to resolve release via web.")
+                    }
+                }
+
+                val tagName = effectiveUrl.substringAfterLast("/releases/tag/")
+                    .substringBefore("?")
+                    .substringBefore("#")
+                    .trim()
+                val isNewer = isNewerVersion(tagName, currentVersion)
+
+                if (!isNewer && !forceUpdate) {
+                    return@withContext UpdateCheckState.UpToDate(currentVersion)
+                }
+
+                val cleanNewVersion = tagName.removePrefix("v").removePrefix("V")
+                val downloadUrl = "https://github.com/$owner/$repo/releases/download/$tagName/weather-app-release.apk"
+
+                buildUpdateAvailable(
+                    currentVersion = currentVersion,
+                    remoteVersion = cleanNewVersion,
+                    rawTitle = "Weather App $tagName",
+                    rawNotes = if (isNewer) "New release $tagName is available on GitHub." else "",
+                    downloadUrl = downloadUrl,
+                    assetSize = 0L,
+                    assetName = "weather-app-release.apk",
+                    tagName = tagName,
+                    isNewer = isNewer
+                )
             }
-
-            val tagName = effectiveUrl.substringAfterLast("/releases/tag/").trim()
-            val isNewer = isNewerVersion(tagName, currentVersion)
-
-            if (!isNewer) {
-                return@withContext UpdateCheckState.UpToDate(currentVersion)
-            }
-
-            val cleanNewVersion = tagName.removePrefix("v").removePrefix("V")
-            val downloadUrl = "https://github.com/$owner/$repo/releases/download/$tagName/weather-app-release.apk"
-
-            UpdateCheckState.UpdateAvailable(
-                currentVersion = currentVersion,
-                newVersion = cleanNewVersion,
-                releaseTitle = "Weather App $tagName",
-                releaseNotes = "New release $tagName is available on GitHub.",
-                downloadUrl = downloadUrl,
-                assetSize = 14_242_447L
-            )
         } catch (e: Exception) {
-            UpdateCheckState.Error("API rate limit exceeded and web fallback failed: ${e.message}")
+            if (forceUpdate) {
+                createMockUpdateState(currentVersion)
+            } else {
+                UpdateCheckState.Error("API rate limit exceeded and web fallback failed: ${e.message}")
+            }
         }
     }
 
@@ -326,6 +338,75 @@ class AppUpdateManager(private val context: Context) {
 
     companion object {
         const val MOCK_DOWNLOAD_URL = "mock://ota-test-package"
+        const val OTA_METADATA_ASSET = "ota-metadata.json"
+        private const val USER_AGENT = "WeatherApp-Android"
+
+        internal fun parseOtaMetadata(json: String, gson: Gson = Gson()): OtaMetadata? {
+            if (json.isBlank()) return null
+            return try {
+                val parsed = gson.fromJson(json, OtaMetadata::class.java)
+                if (parsed != null && parsed.tagName.isNotBlank() && parsed.downloadUrl.isNotBlank()) parsed else null
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        internal fun evaluateMetadataUpdate(
+            metadata: OtaMetadata,
+            currentVersion: String,
+            currentVersionCode: Int,
+            forceUpdate: Boolean = false
+        ): UpdateCheckState {
+            val isNewer = (metadata.versionCode > currentVersionCode) ||
+                isNewerVersion(metadata.tagName, currentVersion)
+            if (!isNewer && !forceUpdate) {
+                return UpdateCheckState.UpToDate(currentVersion)
+            }
+            val remoteVersion = metadata.versionName.ifBlank {
+                metadata.tagName.removePrefix("v").removePrefix("V")
+            }
+            return buildUpdateAvailable(
+                currentVersion = currentVersion,
+                remoteVersion = remoteVersion,
+                rawTitle = metadata.releaseTitle?.takeIf { it.isNotBlank() } ?: metadata.tagName,
+                rawNotes = metadata.releaseNotes.orEmpty(),
+                downloadUrl = metadata.downloadUrl,
+                assetSize = metadata.apkSize,
+                assetName = metadata.apkName.ifBlank { "weather-app-release.apk" },
+                tagName = metadata.tagName,
+                isNewer = isNewer
+            )
+        }
+
+        internal fun buildUpdateAvailable(
+            currentVersion: String,
+            remoteVersion: String,
+            rawTitle: String,
+            rawNotes: String,
+            downloadUrl: String,
+            assetSize: Long,
+            assetName: String,
+            tagName: String,
+            isNewer: Boolean
+        ): UpdateCheckState.UpdateAvailable {
+            val targetVersion = if (isNewer) remoteVersion else "$remoteVersion (OTA Test)"
+            val title = if (isNewer) rawTitle else "$rawTitle [OTA Test]"
+            val notes = if (isNewer) {
+                rawNotes
+            } else {
+                rawNotes.ifBlank {
+                    "Easter Egg OTA Test Mode.\n\n• Target release: $tagName\n• Asset: $assetName\n• Verifies OTA download pipeline, progress tracking, and package installer handoff."
+                }
+            }
+            return UpdateCheckState.UpdateAvailable(
+                currentVersion = currentVersion,
+                newVersion = targetVersion,
+                releaseTitle = title,
+                releaseNotes = notes,
+                downloadUrl = downloadUrl,
+                assetSize = assetSize
+            )
+        }
 
         internal fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean {
             val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V")
