@@ -33,13 +33,15 @@ import kotlin.math.sin
  */
 object WeatherWidgetIconDrawer {
 
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeCap = Paint.Cap.ROUND
-        strokeJoin = Paint.Join.ROUND
+    private class DrawPaints {
+        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
     }
 
     fun drawIcon(
@@ -51,19 +53,22 @@ object WeatherWidgetIconDrawer {
     ) {
         if (sizePx <= 4f) return
         val sz = sizePx
+        val paints = DrawPaints()
 
         when (effectType) {
-            WeatherEffectType.CLEAR_DAY -> drawClearDay(canvas, cx, cy, sz)
-            WeatherEffectType.CLEAR_NIGHT -> drawClearNight(canvas, cx, cy, sz)
-            WeatherEffectType.CLOUDY -> drawCloudy(canvas, cx, cy, sz)
-            WeatherEffectType.RAIN -> drawRain(canvas, cx, cy, sz)
-            WeatherEffectType.THUNDERSTORM -> drawThunderstorm(canvas, cx, cy, sz)
-            WeatherEffectType.SNOW -> drawSnow(canvas, cx, cy, sz)
-            else -> drawClearDay(canvas, cx, cy, sz)
+            WeatherEffectType.CLEAR_DAY -> drawClearDay(canvas, paints, cx, cy, sz)
+            WeatherEffectType.CLEAR_NIGHT -> drawClearNight(canvas, paints, cx, cy, sz)
+            WeatherEffectType.CLOUDY -> drawCloudy(canvas, paints, cx, cy, sz)
+            WeatherEffectType.RAIN -> drawRain(canvas, paints, cx, cy, sz)
+            WeatherEffectType.THUNDERSTORM -> drawThunderstorm(canvas, paints, cx, cy, sz)
+            WeatherEffectType.SNOW -> drawSnow(canvas, paints, cx, cy, sz)
+            else -> drawClearDay(canvas, paints, cx, cy, sz)
         }
     }
 
-    private fun drawClearDay(canvas: Canvas, cx: Float, cy: Float, sz: Float) {
+    private fun drawClearDay(canvas: Canvas, paints: DrawPaints, cx: Float, cy: Float, sz: Float) {
+        val fillPaint = paints.fillPaint
+        val strokePaint = paints.strokePaint
         val sunRadius = sz * 0.24f
 
         // 1. Soft outer ambient solar corona glow
@@ -119,7 +124,9 @@ object WeatherWidgetIconDrawer {
         fillPaint.shader = null
     }
 
-    private fun drawClearNight(canvas: Canvas, cx: Float, cy: Float, sz: Float) {
+    private fun drawClearNight(canvas: Canvas, paints: DrawPaints, cx: Float, cy: Float, sz: Float) {
+        val fillPaint = paints.fillPaint
+        val strokePaint = paints.strokePaint
         val r = sz * 0.25f
 
         // 1. Ambient lunar halo
@@ -189,7 +196,8 @@ object WeatherWidgetIconDrawer {
         fillPaint.shader = null
     }
 
-    private fun drawCloudy(canvas: Canvas, cx: Float, cy: Float, sz: Float) {
+    private fun drawCloudy(canvas: Canvas, paints: DrawPaints, cx: Float, cy: Float, sz: Float) {
+        val fillPaint = paints.fillPaint
         val bgPath = buildVolumetricCloudPath(cx + sz * 0.07f, cy - sz * 0.06f, sz, 0.82f)
         fillPaint.shader = LinearGradient(
             cx,
@@ -206,6 +214,7 @@ object WeatherWidgetIconDrawer {
         val fgPath = buildVolumetricCloudPath(cx - sz * 0.03f, cy + sz * 0.05f, sz, 1.02f)
         drawDimensionalForegroundCloud(
             canvas = canvas,
+            paints = paints,
             cloudPath = fgPath,
             cx = cx,
             topY = cy - sz * 0.20f,
@@ -214,7 +223,9 @@ object WeatherWidgetIconDrawer {
         )
     }
 
-    private fun drawRain(canvas: Canvas, cx: Float, cy: Float, sz: Float) {
+    private fun drawRain(canvas: Canvas, paints: DrawPaints, cx: Float, cy: Float, sz: Float) {
+        val fillPaint = paints.fillPaint
+        val strokePaint = paints.strokePaint
         val bgPath = buildVolumetricCloudPath(cx + sz * 0.06f, cy - sz * 0.14f, sz, 0.78f)
         fillPaint.shader = null
         fillPaint.color = CloudShadowSlate.copy(alpha = 0.72f).toArgb()
@@ -242,6 +253,7 @@ object WeatherWidgetIconDrawer {
         val fgPath = buildVolumetricCloudPath(cx - sz * 0.02f, cy - sz * 0.07f, sz, 0.98f)
         drawDimensionalForegroundCloud(
             canvas = canvas,
+            paints = paints,
             cloudPath = fgPath,
             cx = cx,
             topY = cy - sz * 0.30f,
@@ -250,7 +262,9 @@ object WeatherWidgetIconDrawer {
         )
     }
 
-    private fun drawThunderstorm(canvas: Canvas, cx: Float, cy: Float, sz: Float) {
+    private fun drawThunderstorm(canvas: Canvas, paints: DrawPaints, cx: Float, cy: Float, sz: Float) {
+        val fillPaint = paints.fillPaint
+        val strokePaint = paints.strokePaint
         val bgPath = buildVolumetricCloudPath(cx + sz * 0.06f, cy - sz * 0.15f, sz, 0.80f)
         fillPaint.shader = null
         fillPaint.color = CloudStormDark.copy(alpha = 0.85f).toArgb()
@@ -306,6 +320,7 @@ object WeatherWidgetIconDrawer {
         val fgPath = buildVolumetricCloudPath(cx - sz * 0.02f, cy - sz * 0.09f, sz, 0.96f)
         drawDimensionalForegroundCloud(
             canvas = canvas,
+            paints = paints,
             cloudPath = fgPath,
             cx = cx,
             topY = cy - sz * 0.32f,
@@ -314,7 +329,9 @@ object WeatherWidgetIconDrawer {
         )
     }
 
-    private fun drawSnow(canvas: Canvas, cx: Float, cy: Float, sz: Float) {
+    private fun drawSnow(canvas: Canvas, paints: DrawPaints, cx: Float, cy: Float, sz: Float) {
+        val fillPaint = paints.fillPaint
+        val strokePaint = paints.strokePaint
         val bgPath = buildVolumetricCloudPath(cx + sz * 0.06f, cy - sz * 0.14f, sz, 0.78f)
         fillPaint.shader = null
         fillPaint.color = CloudMidSilver.copy(alpha = 0.72f).toArgb()
@@ -338,6 +355,7 @@ object WeatherWidgetIconDrawer {
         val fgPath = buildVolumetricCloudPath(cx - sz * 0.02f, cy - sz * 0.07f, sz, 0.96f)
         drawDimensionalForegroundCloud(
             canvas = canvas,
+            paints = paints,
             cloudPath = fgPath,
             cx = cx,
             topY = cy - sz * 0.30f,
@@ -348,12 +366,15 @@ object WeatherWidgetIconDrawer {
 
     private fun drawDimensionalForegroundCloud(
         canvas: Canvas,
+        paints: DrawPaints,
         cloudPath: Path,
         cx: Float,
         topY: Float,
         bottomY: Float,
         sz: Float
     ) {
+        val fillPaint = paints.fillPaint
+        val strokePaint = paints.strokePaint
         fillPaint.shader = LinearGradient(
             cx,
             topY,

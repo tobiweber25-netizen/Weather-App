@@ -8,7 +8,10 @@ import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.google.gson.Gson
 import com.google.weatherapp.BuildConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -79,32 +82,42 @@ class AppUpdateManager(private val context: Context) {
                 }
 
                 val release = gson.fromJson(bodyString, GitHubRelease::class.java)
-                val isNewer = isNewerVersion(release.tagName, currentVersion)
+                val tagName = release?.tagName?.takeIf { it.isNotBlank() }
+                if (release == null || tagName == null) {
+                    if (forceUpdate) {
+                        return@withContext createMockUpdateState(currentVersion)
+                    }
+                    return@withContext UpdateCheckState.Error("Malformed release payload from GitHub.")
+                }
+                val isNewer = isNewerVersion(tagName, currentVersion)
 
                 if (!isNewer && !forceUpdate) {
                     return@withContext UpdateCheckState.UpToDate(currentVersion)
                 }
 
-                val apkAsset = release.assets.firstOrNull { it.name.endsWith(".apk", ignoreCase = true) }
+                val assets: List<GitHubReleaseAsset> = release.assets ?: emptyList()
+                val apkAsset = assets.firstOrNull { it.name.endsWith(".apk", ignoreCase = true) }
                 if (apkAsset == null) {
                     if (forceUpdate) {
                         return@withContext createMockUpdateState(currentVersion)
                     }
-                    return@withContext UpdateCheckState.Error("Release ${release.tagName} found, but no .apk asset attached.")
+                    return@withContext UpdateCheckState.Error("Release $tagName found, but no .apk asset attached.")
                 }
 
                 buildUpdateAvailable(
                     currentVersion = currentVersion,
-                    remoteVersion = release.tagName.removePrefix("v").removePrefix("V"),
-                    rawTitle = release.name ?: release.tagName,
+                    remoteVersion = tagName.removePrefix("v").removePrefix("V"),
+                    rawTitle = release.name ?: tagName,
                     rawNotes = release.body.orEmpty(),
                     downloadUrl = apkAsset.downloadUrl,
                     assetSize = apkAsset.size,
                     assetName = apkAsset.name,
-                    tagName = release.tagName,
+                    tagName = tagName,
                     isNewer = isNewer
                 )
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             if (forceUpdate) {
                 createMockUpdateState(currentVersion)
@@ -151,14 +164,17 @@ class AppUpdateManager(private val context: Context) {
         if (downloadUrl == MOCK_DOWNLOAD_URL) {
             return@withContext simulateApkDownload(onProgress)
         }
-        try {
-            val request = Request.Builder()
+        val updatesDir = File(context.cacheDir, "updates").apply { if (!exists()) mkdirs() }
+        val destinationFile = File(updatesDir, "update.apk")
+        val call = httpClient.newCall(
+            Request.Builder()
                 .url(downloadUrl)
                 .header("Accept", "application/octet-stream")
                 .header("User-Agent", USER_AGENT)
                 .build()
-
-            httpClient.newCall(request).execute().use { response ->
+        )
+        try {
+            call.execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(Exception("Failed to download APK: HTTP ${response.code}"))
                 }
@@ -166,8 +182,6 @@ class AppUpdateManager(private val context: Context) {
                 val body = response.body ?: return@withContext Result.failure(Exception("Response body is empty"))
                 val totalBytes = body.contentLength()
 
-                val updatesDir = File(context.cacheDir, "updates").apply { if (!exists()) mkdirs() }
-                val destinationFile = File(updatesDir, "update.apk")
                 if (destinationFile.exists()) destinationFile.delete()
 
                 body.byteStream().use { inputStream ->
@@ -175,20 +189,33 @@ class AppUpdateManager(private val context: Context) {
                         val buffer = ByteArray(8 * 1024)
                         var bytesRead: Int
                         var totalRead = 0L
+                        var lastEmitMs = 0L
 
                         while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            currentCoroutineContext().ensureActive()
                             outputStream.write(buffer, 0, bytesRead)
                             totalRead += bytesRead
-                            val progress = if (totalBytes > 0) totalRead.toFloat() / totalBytes else 0f
-                            onProgress(progress, totalRead, totalBytes)
+                            val nowMs = System.currentTimeMillis()
+                            if (nowMs - lastEmitMs >= 80L || (totalBytes > 0 && totalRead >= totalBytes)) {
+                                lastEmitMs = nowMs
+                                val progress = if (totalBytes > 0) totalRead.toFloat() / totalBytes else 0f
+                                onProgress(progress, totalRead, totalBytes)
+                            }
                         }
                         outputStream.flush()
+                        val finalProgress = if (totalBytes > 0) (totalRead.toFloat() / totalBytes).coerceIn(0f, 1f) else 1f
+                        onProgress(finalProgress, totalRead, totalBytes)
                     }
                 }
 
                 Result.success(destinationFile)
             }
+        } catch (e: CancellationException) {
+            call.cancel()
+            if (destinationFile.exists()) destinationFile.delete()
+            throw e
         } catch (e: Exception) {
+            if (destinationFile.exists()) destinationFile.delete()
             Result.failure(e)
         }
     }
@@ -331,6 +358,8 @@ class AppUpdateManager(private val context: Context) {
                 destinationFile.writeBytes("OTA Test Fallback APK Content".toByteArray())
             }
             Result.success(destinationFile)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -362,7 +391,7 @@ class AppUpdateManager(private val context: Context) {
             if (!isNewer && !forceUpdate) {
                 return UpdateCheckState.UpToDate(currentVersion)
             }
-            val remoteVersion = metadata.versionName.ifBlank {
+            val remoteVersion = (metadata.versionName as String?).orEmpty().ifBlank {
                 metadata.tagName.removePrefix("v").removePrefix("V")
             }
             return buildUpdateAvailable(
@@ -372,7 +401,7 @@ class AppUpdateManager(private val context: Context) {
                 rawNotes = metadata.releaseNotes.orEmpty(),
                 downloadUrl = metadata.downloadUrl,
                 assetSize = metadata.apkSize,
-                assetName = metadata.apkName.ifBlank { "weather-app-release.apk" },
+                assetName = (metadata.apkName as String?).orEmpty().ifBlank { "weather-app-release.apk" },
                 tagName = metadata.tagName,
                 isNewer = isNewer
             )

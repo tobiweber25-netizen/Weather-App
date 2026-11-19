@@ -12,12 +12,13 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.Locale
 import kotlin.coroutines.resume
-import kotlin.coroutines.suspendCoroutine
+import kotlin.math.abs
 
 class LocationClient(private val context: Context) {
 
@@ -39,15 +40,24 @@ class LocationClient(private val context: Context) {
     }
 
     private fun saveCoordinates(coords: Coordinates) {
+        val prevLat = prefs.getString("last_lat", null)?.toDoubleOrNull()
+        val prevLon = prefs.getString("last_lon", null)?.toDoubleOrNull()
+        val movedSignificantly = prevLat == null || prevLon == null ||
+            abs(coords.latitude - prevLat) > 0.02 || abs(coords.longitude - prevLon) > 0.02
+
         prefs.edit()
             .putString("last_lat", coords.latitude.toString())
             .putString("last_lon", coords.longitude.toString())
             .apply {
                 if (coords.altitude != null) {
                     putString("last_altitude", coords.altitude.toString())
+                } else if (movedSignificantly) {
+                    remove("last_altitude")
                 }
                 if (!coords.locationName.isNullOrBlank()) {
                     putString("last_location_name", coords.locationName)
+                } else if (movedSignificantly) {
+                    remove("last_location_name")
                 }
             }
             .apply()
@@ -77,15 +87,15 @@ class LocationClient(private val context: Context) {
             val now = System.currentTimeMillis()
             val maxAgeMs = 15 * 60 * 1000L
 
-            if (!forceFresh) {
-                val lastLocation = fusedClient.lastLocation.await()
-                if (lastLocation != null && (now - lastLocation.time) in 0..maxAgeMs) {
-                    val name = resolveLocationName(lastLocation.latitude, lastLocation.longitude)
-                    val alt = if (lastLocation.hasAltitude()) lastLocation.altitude else null
-                    val coords = Coordinates(lastLocation.latitude, lastLocation.longitude, name, alt)
-                    saveCoordinates(coords)
-                    return@withContext coords
-                }
+            val lastLocation = withTimeoutOrNull(3000L) {
+                fusedClient.lastLocation.await()
+            }
+            if (!forceFresh && lastLocation != null && (now - lastLocation.time) in 0..maxAgeMs) {
+                val name = resolveLocationName(lastLocation.latitude, lastLocation.longitude)
+                val alt = if (lastLocation.hasAltitude()) lastLocation.altitude else null
+                val coords = Coordinates(lastLocation.latitude, lastLocation.longitude, name, alt)
+                saveCoordinates(coords)
+                return@withContext coords
             }
 
             val cts = CancellationTokenSource()
@@ -100,15 +110,18 @@ class LocationClient(private val context: Context) {
                 }
             }
 
-            if (currentLocation != null) {
-                val name = resolveLocationName(currentLocation.latitude, currentLocation.longitude)
-                val alt = if (currentLocation.hasAltitude()) currentLocation.altitude else null
-                val coords = Coordinates(currentLocation.latitude, currentLocation.longitude, name, alt)
+            val resolvedLocation = currentLocation ?: lastLocation
+            if (resolvedLocation != null) {
+                val name = resolveLocationName(resolvedLocation.latitude, resolvedLocation.longitude)
+                val alt = if (resolvedLocation.hasAltitude()) resolvedLocation.altitude else null
+                val coords = Coordinates(resolvedLocation.latitude, resolvedLocation.longitude, name, alt)
                 saveCoordinates(coords)
                 coords
             } else {
                 getCachedCoordinates()
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (_: Exception) {
             getCachedCoordinates()
         }
@@ -120,13 +133,13 @@ class LocationClient(private val context: Context) {
             val geocoder = Geocoder(context, Locale.getDefault())
             val address = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 withTimeoutOrNull(2500L) {
-                    suspendCoroutine { cont ->
+                    suspendCancellableCoroutine { cont ->
                         geocoder.getFromLocation(lat, lon, 1, object : Geocoder.GeocodeListener {
                             override fun onGeocode(addresses: MutableList<android.location.Address>) {
-                                cont.resume(addresses.firstOrNull())
+                                if (cont.isActive) cont.resume(addresses.firstOrNull())
                             }
                             override fun onError(errorMessage: String?) {
-                                cont.resume(null)
+                                if (cont.isActive) cont.resume(null)
                             }
                         })
                     }

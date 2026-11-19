@@ -330,14 +330,24 @@ private fun DownloadingContent(downloadState: UpdateDownloadState.Downloading) {
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onSurface
         )
-        LinearProgressIndicator(
-            progress = { downloadState.progress.coerceIn(0f, 1f) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(SpacingTokens.Small),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = MaterialTheme.colorScheme.surfaceVariant
-        )
+        if (downloadState.totalBytes > 0) {
+            LinearProgressIndicator(
+                progress = { downloadState.progress.coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(SpacingTokens.Small),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        } else {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(SpacingTokens.Small),
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        }
         Text(
             text = if (downloadState.totalBytes > 0) {
                 String.format(Locale.US, "%d%% (%.1f / %.1f MB)", progressPercent, downloadedMb, totalMb)

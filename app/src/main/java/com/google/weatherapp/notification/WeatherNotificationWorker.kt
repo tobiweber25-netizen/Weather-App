@@ -3,7 +3,6 @@ package com.google.weatherapp.notification
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import com.google.weatherapp.data.local.WeatherLocalDataSource
 import com.google.weatherapp.widget.WeatherWidgetUpdater
 import java.time.LocalTime
 import java.time.ZoneId
@@ -21,43 +20,52 @@ class WeatherNotificationWorker(
 
         val type = inputData.getString(KEY_NOTIFICATION_TYPE) ?: TYPE_PERIODIC_CHECK
 
-        // Widgets follow the city selected in the app; notifications always follow where the device is.
-        val fresh = WeatherWidgetUpdater.fetchFreshWeatherIfNeeded(applicationContext)
-        val widgetData = if (fresh != null && fresh.dailyList.isNotEmpty()) fresh else null
-        val data = WeatherNotificationScheduler.fetchDeviceWeather(applicationContext)
-            ?: WeatherNotificationScheduler.getEffectiveDashboardData(applicationContext)
-        val hasDeviceLocationData = WeatherLocalDataSource(applicationContext).getDeviceWeather() != null
+        // Notifications always follow where the device is; only post briefings when real today data is available.
+        val deviceData = WeatherNotificationScheduler.fetchDeviceWeather(applicationContext)
+        val freshTodayData = deviceData?.takeIf { WeatherNotificationScheduler.isForToday(it) }
 
         when (type) {
             TYPE_MORNING -> {
+                WeatherNotificationScheduler.scheduleMorning(applicationContext)
                 if (prefs.canPostMorningNotification()) {
-                    val posted = WeatherNotificationHelper.showMorningBriefingNotification(applicationContext, data)
-                    if (posted) {
-                        prefs.recordMorningNotificationPosted()
+                    if (freshTodayData != null) {
+                        val posted = WeatherNotificationHelper.showMorningBriefingNotification(applicationContext, freshTodayData)
+                        if (posted) {
+                            prefs.recordMorningNotificationPosted()
+                        }
+                    } else if (runAttemptCount < 3) {
+                        return Result.retry()
                     }
                 }
-                WeatherNotificationScheduler.scheduleMorning(applicationContext)
             }
             TYPE_EVENING -> {
+                WeatherNotificationScheduler.scheduleEvening(applicationContext)
                 if (prefs.canPostEveningNotification()) {
-                    val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(applicationContext, data)
-                    if (posted) {
-                        prefs.recordEveningNotificationPosted()
+                    if (freshTodayData != null) {
+                        val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(applicationContext, freshTodayData)
+                        if (posted) {
+                            prefs.recordEveningNotificationPosted()
+                        }
+                    } else if (runAttemptCount < 3) {
+                        return Result.retry()
                     }
                 }
-                WeatherNotificationScheduler.scheduleEvening(applicationContext)
             }
             TYPE_PERIODIC_CHECK, TYPE_BACKGROUND_SYNC -> {
                 // 1. Update widgets with freshest data (for the city shown in the app)
-                try {
-                    WeatherWidgetUpdater.updateAllWidgets(applicationContext, widgetData ?: data)
-                } catch (_: Exception) {
-                    // Non-critical
+                val fresh = WeatherWidgetUpdater.fetchFreshWeatherIfNeeded(applicationContext)
+                val widgetData = if (fresh != null && fresh.dailyList.isNotEmpty()) fresh else deviceData
+                if (widgetData != null) {
+                    try {
+                        WeatherWidgetUpdater.updateAllWidgets(applicationContext, widgetData)
+                    } catch (_: Exception) {
+                        // Non-critical
+                    }
                 }
 
                 // 2. Event alerts only when the device location is known: never alert about another place.
-                if (hasDeviceLocationData) {
-                    WeatherNotificationScheduler.checkAndDispatchEventAlerts(applicationContext, data)
+                if (deviceData != null) {
+                    WeatherNotificationScheduler.checkAndDispatchEventAlerts(applicationContext, deviceData)
                 }
 
                 // 3. Intelligent Catch-Up Delivery if scheduled time was missed (e.g. phone was off during alarm).
@@ -67,7 +75,7 @@ class WeatherNotificationWorker(
                 val nowTime = LocalTime.now(zoneId)
 
                 // Morning catchup (only AFTER morning time up to 11:30 AM)
-                if (WeatherNotificationScheduler.isWithinMorningCatchupWindow(
+                if (freshTodayData != null && WeatherNotificationScheduler.isWithinMorningCatchupWindow(
                         nowHour = nowTime.hour,
                         nowMinute = nowTime.minute,
                         morningHour = prefs.morningHour,
@@ -75,7 +83,7 @@ class WeatherNotificationWorker(
                     )
                 ) {
                     if (prefs.canPostMorningNotification(zoneId = zoneId)) {
-                        val posted = WeatherNotificationHelper.showMorningBriefingNotification(applicationContext, data)
+                        val posted = WeatherNotificationHelper.showMorningBriefingNotification(applicationContext, freshTodayData)
                         if (posted) {
                             prefs.recordMorningNotificationPosted(zoneId = zoneId)
                         }
@@ -83,7 +91,7 @@ class WeatherNotificationWorker(
                 }
 
                 // Evening catchup (only AFTER evening time up to 23:59)
-                if (WeatherNotificationScheduler.isWithinEveningCatchupWindow(
+                if (freshTodayData != null && WeatherNotificationScheduler.isWithinEveningCatchupWindow(
                         nowHour = nowTime.hour,
                         nowMinute = nowTime.minute,
                         eveningHour = prefs.eveningHour,
@@ -91,7 +99,7 @@ class WeatherNotificationWorker(
                     )
                 ) {
                     if (prefs.canPostEveningNotification(zoneId = zoneId)) {
-                        val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(applicationContext, data)
+                        val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(applicationContext, freshTodayData)
                         if (posted) {
                             prefs.recordEveningNotificationPosted(zoneId = zoneId)
                         }

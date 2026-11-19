@@ -88,23 +88,35 @@ fun EveningForecastSheet(
 
     var pendingTestType by remember { mutableStateOf<TestNotificationType?>(null) }
 
+    fun openNotificationSettings() {
+        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         systemNotificationsAllowed = NotificationManagerCompat.from(context).areNotificationsEnabled()
+        val requestedTestType = pendingTestType
+        pendingTestType = null
         if (isGranted || systemNotificationsAllowed) {
-            val type = pendingTestType ?: TestNotificationType.EVENING
-            WeatherNotificationScheduler.triggerTestNotification(context, type) { success ->
-                Toast.makeText(
-                    context,
-                    if (success) "Notification sent to shade!" else "Failed to post notification.",
-                    Toast.LENGTH_SHORT
-                ).show()
+            WeatherNotificationScheduler.ensureScheduled(context)
+            if (requestedTestType != null) {
+                WeatherNotificationScheduler.triggerTestNotification(context, requestedTestType) { success ->
+                    Toast.makeText(
+                        context,
+                        if (success) "Notification sent to shade!" else "Failed to post notification.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
             }
         } else {
-            Toast.makeText(context, "Notification permission is required.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Enable notifications in Android Settings to receive alerts.", Toast.LENGTH_SHORT).show()
+            openNotificationSettings()
         }
-        pendingTestType = null
     }
 
     fun dispatchTest(type: TestNotificationType) {
@@ -331,10 +343,7 @@ fun EveningForecastSheet(
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                                     permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                                 } else {
-                                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                                    }
-                                    context.startActivity(intent)
+                                    openNotificationSettings()
                                 }
                             },
                             shape = RoundedCornerShape(CornerTokens.Medium)
@@ -416,8 +425,8 @@ fun EveningForecastSheet(
 
                 NotificationCategoryItem(
                     icon = Icons.Default.Thermostat,
-                    title = "Extreme Heat & Tropical Nights",
-                    description = "High ≥ 35°C, feels like ≥ 40°C, or night low ≥ 20°C",
+                    title = "Extreme Heat Warning",
+                    description = "High ≥ 35°C or feels like ≥ 40°C",
                     checked = heatEnabled,
                     enabled = isEnabled,
                     onCheckedChange = {

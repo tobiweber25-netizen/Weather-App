@@ -120,7 +120,8 @@ object WeatherWidgetUpdater {
                     repo.getWeatherData(
                         latitude = coords.latitude,
                         longitude = coords.longitude,
-                        resolvedLocationName = coords.locationName
+                        resolvedLocationName = coords.locationName,
+                        altitude = coords.altitude
                     )
                 } else {
                     val fallbackCity = repo.getSavedLocations().firstOrNull()

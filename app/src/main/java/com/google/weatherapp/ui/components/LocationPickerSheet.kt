@@ -169,7 +169,10 @@ fun LocationPickerSheet(
                             )
                         }
                         items(savedLocations) { city ->
-                            val isSelected = selectedCustomLocation?.name.equals(city.name, ignoreCase = true)
+                            val isSelected = selectedCustomLocation != null &&
+                                selectedCustomLocation.name.equals(city.name, ignoreCase = true) &&
+                                selectedCustomLocation.country.equals(city.country, ignoreCase = true) &&
+                                selectedCustomLocation.adminArea.equals(city.adminArea, ignoreCase = true)
                             LocationRowCard(
                                 title = city.name,
                                 subtitle = city.displaySubtitle,

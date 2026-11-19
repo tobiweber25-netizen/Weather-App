@@ -477,4 +477,103 @@ class WeatherAccuracyAndTelemetryFixesTest {
         assertEquals(19, calibratedAt20[0].tempDegrees)
         assertEquals(18, calibratedAt20[1].tempDegrees)
     }
+
+    @Test
+    fun testFormatIsoTimeHandlesUtcPositiveAndNegativeOffsets() {
+        val nyZone = ZoneId.of("America/New_York")
+        val jhbZone = ZoneId.of("Africa/Johannesburg")
+
+        assertEquals("06:47", WeatherMapper.formatIsoTime("2026-11-19T11:47:33Z", nyZone, "06:15"))
+        assertEquals("06:47", WeatherMapper.formatIsoTime("2026-11-19T06:47:00-05:00", nyZone, "06:15"))
+        assertEquals("05:18", WeatherMapper.formatIsoTime("2026-11-19T05:18:00+02:00", jhbZone, "06:15"))
+        assertEquals("06:47", WeatherMapper.formatIsoTime("2026-11-19T06:47", nyZone, "06:15"))
+    }
+
+    @Test
+    fun testOpenMeteoFallbackUsesSeaLevelPressureAndDetectsUpcomingHourlyStorms() {
+        val today = LocalDate.now(testZone)
+        val nowHour = ZonedDateTime.now(testZone).hour
+        val nowKey = String.format(Locale.US, "%sT%02d:00", today, nowHour)
+        val nextDateTime = ZonedDateTime.now(testZone).plusHours(2)
+        val stormKey = nextDateTime.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:00", Locale.US))
+
+        val omForecast = OpenMeteoForecastResponse(
+            timezone = "UTC",
+            current = OpenMeteoCurrent(
+                temperature2m = 21.0,
+                pressureMsl = 1015.4,
+                surfacePressure = 834.5,
+                weatherCode = 2,
+                isDay = 1
+            ),
+            hourly = OpenMeteoHourly(
+                time = listOf(nowKey, stormKey),
+                temperature2m = listOf(21.0, 20.0),
+                weatherCode = listOf(2, 95),
+                precipitationProbability = listOf(10, 80)
+            ),
+            daily = OpenMeteoDaily(
+                time = listOf(today.toString()),
+                weatherCode = listOf(95),
+                temperature2mMax = listOf(24.0),
+                temperature2mMin = listOf(14.0),
+                windSpeed10mMax = listOf(0.0)
+            )
+        )
+
+        val result = WeatherMapper.mapOpenMeteoFallbackDashboardData(
+            omForecast = omForecast,
+            omAqi = null,
+            resolvedLocationName = "Johannesburg"
+        )
+
+        assertEquals(1015, result.telemetry.pressureHpa)
+        assertEquals("AM: Calm", result.dailyList.first().morningWind)
+        assertEquals(SeverityRiskLevel.SEVERE, result.alert.riskLevel)
+        assertEquals(80, result.alert.thunderstormProbability)
+        assertTrue(result.alert.title.contains("SEVERE THUNDERSTORM"))
+    }
+
+    @Test
+    fun testEnsembleNormalizesNightWindCardinalAndAlignsTodayOmIndexAndFogTheme() {
+        val today = LocalDate.now(testZone)
+        val yesterday = today.minusDays(1)
+        val current = CurrentConditionsResponse(
+            temperature = Temperature("CELSIUS", 15.0),
+            weatherCondition = WeatherCondition(type = "FOG", description = ConditionDescription("Dense Fog")),
+            isDaytime = true
+        )
+        val day = ForecastDay(
+            displayDate = DisplayDate(today.year, today.monthValue, today.dayOfMonth),
+            nighttimeForecast = DayPeriodForecast(
+                wind = Wind(
+                    direction = WindDirection(cardinal = "WEST_SOUTHWEST", degrees = 246),
+                    speed = WindSpeed(value = 14.0)
+                )
+            )
+        )
+        val omForecast = OpenMeteoForecastResponse(
+            timezone = "UTC",
+            daily = OpenMeteoDaily(
+                time = listOf(yesterday.toString(), today.toString()),
+                sunrise = listOf("${yesterday}T05:00", "${today}T06:12"),
+                sunset = listOf("${yesterday}T17:00", "${today}T18:44"),
+                uvIndexMax = listOf(2.0, 9.0)
+            )
+        )
+
+        val result = WeatherMapper.mapEnsembleDashboardData(
+            current = current,
+            hourly = HourlyForecastResponse(emptyList()),
+            daily = DailyForecastResponse(listOf(day)),
+            omForecast = omForecast,
+            omAqi = null
+        )
+
+        assertEquals("WSW", result.dailyList.first().nightWindDirection)
+        assertEquals("06:12", result.telemetry.sunriseTime)
+        assertEquals("18:44", result.telemetry.sunsetTime)
+        assertEquals(9, result.telemetry.maxUvIndex)
+        assertEquals(SkyThemeType.OVERCAST, result.hero.skyTheme)
+    }
 }

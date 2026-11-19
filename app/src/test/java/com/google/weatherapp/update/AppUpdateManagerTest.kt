@@ -128,4 +128,24 @@ class AppUpdateManagerTest {
         assertTrue(forced is UpdateCheckState.UpdateAvailable)
         assertTrue((forced as UpdateCheckState.UpdateAvailable).newVersion.contains("OTA Test"))
     }
+
+    @Test
+    fun testEvaluateMetadataUpdateHandlesMissingOptionalFieldsFromGson() {
+        val minimalJson = """
+            {
+              "tag_name": "v1.0.9",
+              "download_url": "https://github.com/tobiweber25-netizen/Weather-App/releases/download/v1.0.9/weather-app-release.apk"
+            }
+        """.trimIndent()
+        val parsed = AppUpdateManager.parseOtaMetadata(minimalJson)
+        assertNotNull(parsed)
+        val state = AppUpdateManager.evaluateMetadataUpdate(
+            metadata = parsed!!,
+            currentVersion = "1.0.5",
+            currentVersionCode = 6,
+            forceUpdate = false
+        )
+        assertTrue(state is UpdateCheckState.UpdateAvailable)
+        assertEquals("1.0.9", (state as UpdateCheckState.UpdateAvailable).newVersion)
+    }
 }

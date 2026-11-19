@@ -101,10 +101,17 @@ open class WeatherNotificationReceiver : BroadcastReceiver() {
             )
         ) {
             if (prefs.canPostMorningNotification()) {
-                val data = WeatherNotificationScheduler.getEffectiveDashboardData(context)
-                val posted = WeatherNotificationHelper.showMorningBriefingNotification(context, data)
-                if (posted) {
-                    prefs.recordMorningNotificationPosted()
+                val cached = WeatherLocalDataSource(context).getDeviceWeather()
+                val hasFreshTodayData = WeatherNotificationHelper.notificationDispatcherOverride != null ||
+                    (cached != null && WeatherNotificationScheduler.isForToday(cached))
+                if (hasFreshTodayData) {
+                    val data = cached ?: WeatherNotificationScheduler.getEffectiveDashboardData(context)
+                    val posted = WeatherNotificationHelper.showMorningBriefingNotification(context, data)
+                    if (posted) {
+                        prefs.recordMorningNotificationPosted()
+                    }
+                } else {
+                    WeatherNotificationScheduler.enqueueImmediateBriefing(context, WeatherNotificationWorker.TYPE_MORNING)
                 }
             }
         }
@@ -117,10 +124,17 @@ open class WeatherNotificationReceiver : BroadcastReceiver() {
             )
         ) {
             if (prefs.canPostEveningNotification()) {
-                val data = WeatherNotificationScheduler.getEffectiveDashboardData(context)
-                val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(context, data)
-                if (posted) {
-                    prefs.recordEveningNotificationPosted()
+                val cached = WeatherLocalDataSource(context).getDeviceWeather()
+                val hasFreshTodayData = WeatherNotificationHelper.notificationDispatcherOverride != null ||
+                    (cached != null && WeatherNotificationScheduler.isForToday(cached))
+                if (hasFreshTodayData) {
+                    val data = cached ?: WeatherNotificationScheduler.getEffectiveDashboardData(context)
+                    val posted = WeatherNotificationHelper.showTomorrowWeatherNotification(context, data)
+                    if (posted) {
+                        prefs.recordEveningNotificationPosted()
+                    }
+                } else {
+                    WeatherNotificationScheduler.enqueueImmediateBriefing(context, WeatherNotificationWorker.TYPE_EVENING)
                 }
             }
         }

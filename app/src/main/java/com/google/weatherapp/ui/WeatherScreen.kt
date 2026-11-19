@@ -31,6 +31,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.weatherapp.data.model.DailyItem
 import com.google.weatherapp.data.model.HeroWeather
@@ -42,6 +43,7 @@ import com.google.weatherapp.ui.components.*
 import com.google.weatherapp.update.AppUpdateManager
 import com.google.weatherapp.update.UpdateCheckState
 import com.google.weatherapp.update.UpdateDownloadState
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import sh.calvin.reorderable.ReorderableItem
@@ -77,8 +79,15 @@ fun WeatherScreen(
     var updateDownloadState by remember { mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle) }
     var showUpdateDialog by remember { mutableStateOf(false) }
     var downloadedApkFile by remember { mutableStateOf<java.io.File?>(null) }
+    var downloadJob by remember { mutableStateOf<Job?>(null) }
+    var canInstallUnknownApps by remember { mutableStateOf(updateManager.canInstallUnknownApps()) }
     var easterEggTapCount by remember { mutableIntStateOf(0) }
     var lastEasterEggTapTime by remember { mutableLongStateOf(0L) }
+
+    LifecycleResumeEffect(Unit) {
+        canInstallUnknownApps = updateManager.canInstallUnknownApps()
+        onPauseOrDispose { }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
@@ -88,7 +97,8 @@ fun WeatherScreen(
         if (granted) {
             viewModel.onLocationPermissionGranted()
         }
-        val notifGranted = permissions[Manifest.permission.POST_NOTIFICATIONS] == true
+        val notifGranted = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            permissions[Manifest.permission.POST_NOTIFICATIONS] == true
         if (notifGranted) {
             com.google.weatherapp.notification.WeatherNotificationScheduler.ensureScheduled(context)
         }
@@ -426,8 +436,12 @@ fun WeatherScreen(
                             )
                         }
                         val reorderableState = rememberReorderableLazyListState(listState) { from, to ->
-                            widgetOrder = widgetOrder.toMutableList().apply {
-                                add(to.index, removeAt(from.index))
+                            val fromIdx = widgetOrder.indexOfFirst { it.name == from.key }
+                            val toIdx = widgetOrder.indexOfFirst { it.name == to.key }
+                            if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+                                widgetOrder = widgetOrder.toMutableList().apply {
+                                    add(toIdx, removeAt(fromIdx))
+                                }
                             }
                         }
 
@@ -534,7 +548,10 @@ fun WeatherScreen(
                             showLocationPicker = false
                         },
                         onRemoveSavedLocation = { viewModel.removeSavedLocation(it) },
-                        onDismiss = { showLocationPicker = false }
+                        onDismiss = {
+                            viewModel.searchCities("")
+                            showLocationPicker = false
+                        }
                     )
                 }
 
@@ -550,12 +567,16 @@ fun WeatherScreen(
                     UpdateDialog(
                         checkState = updateCheckState,
                         downloadState = updateDownloadState,
-                        canInstallUnknownApps = updateManager.canInstallUnknownApps(),
+                        canInstallUnknownApps = canInstallUnknownApps,
                         onDismiss = {
+                            downloadJob?.cancel()
+                            downloadJob = null
                             showUpdateDialog = false
                             updateDownloadState = UpdateDownloadState.Idle
                         },
                         onForceUpdateCheck = {
+                            downloadJob?.cancel()
+                            downloadJob = null
                             updateCheckState = UpdateCheckState.Checking
                             updateDownloadState = UpdateDownloadState.Idle
                             coroutineScope.launch {
@@ -563,13 +584,15 @@ fun WeatherScreen(
                             }
                         },
                         onStartDownload = { url ->
-                            coroutineScope.launch {
+                            downloadJob?.cancel()
+                            downloadJob = coroutineScope.launch {
                                 updateDownloadState = UpdateDownloadState.Downloading(0f, 0L, 0L)
                                 val result = updateManager.downloadApk(url) { progress, read, total ->
                                     updateDownloadState = UpdateDownloadState.Downloading(progress, read, total)
                                 }
                                 result.onSuccess { file ->
                                     downloadedApkFile = file
+                                    canInstallUnknownApps = updateManager.canInstallUnknownApps()
                                     updateDownloadState = UpdateDownloadState.ReadyToInstall(file.absolutePath)
                                 }.onFailure { err ->
                                     updateDownloadState = UpdateDownloadState.Error(err.message ?: "Download failed")

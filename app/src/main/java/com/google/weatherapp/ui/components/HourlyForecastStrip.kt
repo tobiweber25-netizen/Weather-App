@@ -31,6 +31,8 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import com.google.weatherapp.data.model.HourlyItem
 import com.google.weatherapp.theme.*
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 
 private enum class HourlyDimensionMode(val label: String) {
     TEMP("Temp"),
@@ -53,13 +55,17 @@ fun HourlyForecastStrip(
 
     val listState = rememberLazyListState()
     val haptic = LocalHapticFeedback.current
+    val currentItems by rememberUpdatedState(hourlyItems)
+    val currentOnVisibleHourChanged by rememberUpdatedState(onVisibleHourChanged)
 
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex }
+            .distinctUntilChanged()
+            .drop(1)
             .collect { index ->
                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                if (index in hourlyItems.indices) {
-                    onVisibleHourChanged?.invoke(hourlyItems[index])
+                if (index in currentItems.indices) {
+                    currentOnVisibleHourChanged?.invoke(currentItems[index])
                 }
             }
     }

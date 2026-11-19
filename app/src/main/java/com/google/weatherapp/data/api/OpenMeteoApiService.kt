@@ -9,7 +9,7 @@ interface OpenMeteoForecastService {
     suspend fun getForecast(
         @Query("latitude") latitude: Double,
         @Query("longitude") longitude: Double,
-        @Query("current") current: String = "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
+        @Query("current") current: String = "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
         @Query("hourly") hourly: String = "temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,relative_humidity_2m,visibility,is_day,cloud_cover",
         @Query("daily") daily: String = "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant",
         @Query("minutely_15") minutely15: String? = "precipitation,precipitation_probability,weather_code",
@@ -66,6 +66,7 @@ data class OpenMeteoCurrent(
     @SerializedName("precipitation") val precipitation: Double? = null,
     @SerializedName("weather_code") val weatherCode: Int? = null,
     @SerializedName("cloud_cover") val cloudCover: Int? = null,
+    @SerializedName("pressure_msl") val pressureMsl: Double? = null,
     @SerializedName("surface_pressure") val surfacePressure: Double? = null,
     @SerializedName("wind_speed_10m") val windSpeed10m: Double? = null,
     @SerializedName("wind_direction_10m") val windDirection10m: Int? = null,

@@ -293,7 +293,7 @@ fun NothingWeatherIcon(
                 // 2. Flanking rain droplets
                 val dropStroke = maxOf(sz * 0.036f, 1.8f)
                 for (side in listOf(-1, 1)) {
-                    val dropPhase = (t * 3.5f + (if (side < 0) 0.2f else 0.7f)) % 1f
+                    val dropPhase = (t * 4f + (if (side < 0) 0.2f else 0.7f)) % 1f
                     val x = width * 0.5f + side * sz * 0.20f - dropPhase * sz * 0.05f
                     val y = height * 0.55f + dropPhase * sz * 0.22f
                     drawLine(

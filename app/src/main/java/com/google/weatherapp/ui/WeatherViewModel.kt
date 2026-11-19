@@ -41,6 +41,7 @@ class WeatherViewModel @JvmOverloads constructor(
     private var activeJob: Job? = null
     private var searchJob: Job? = null
     private var lastFetchTimestampMs: Long = 0L
+    private var latestRequestId: Long = 0L
 
     fun hasLocationPermission(): Boolean = locationClient.hasLocationPermission()
 
@@ -78,8 +79,8 @@ class WeatherViewModel @JvmOverloads constructor(
     }
 
     fun onLocationPermissionGranted() {
-        if (activeJob?.isActive == true) return
-        fetchAndSetWeatherData(showInitialLoading = true, forceFreshLocation = true)
+        activeJob?.cancel()
+        fetchAndSetWeatherData(showInitialLoading = _uiState.value !is WeatherUiState.Success, forceFreshLocation = true)
     }
 
     fun searchCities(query: String) {
@@ -95,38 +96,52 @@ class WeatherViewModel @JvmOverloads constructor(
     }
 
     fun selectLocation(location: SavedLocation?) {
-        _selectedCustomLocation.value = location
-        repository.setSelectedCustomLocation(location)
-        if (location != null && !location.isCurrentGps) {
+        val normalized = location?.takeUnless { it.isCurrentGps }
+        _selectedCustomLocation.value = normalized
+        repository.setSelectedCustomLocation(normalized)
+        if (normalized != null) {
             val currentList = _savedLocations.value.toMutableList()
-            val exists = currentList.any {
-                it.name.equals(location.name, ignoreCase = true) &&
-                    it.country.equals(location.country, ignoreCase = true)
-            }
+            val exists = currentList.any { isSameLocation(it, normalized) }
             if (!exists) {
-                currentList.add(0, location)
+                currentList.add(0, normalized)
                 _savedLocations.value = currentList
                 repository.saveLocations(currentList)
             }
         }
         _searchResults.value = emptyList()
         activeJob?.cancel()
-        fetchAndSetWeatherData(showInitialLoading = false, forceFreshLocation = location == null)
+        val cachedForNewLocation = repository.getCachedWeatherData()
+        if (cachedForNewLocation != null) {
+            _uiState.value = WeatherUiState.Success(cachedForNewLocation)
+            fetchAndSetWeatherData(showInitialLoading = false, forceFreshLocation = normalized == null)
+        } else {
+            _uiState.value = WeatherUiState.Loading
+            fetchAndSetWeatherData(showInitialLoading = true, forceFreshLocation = normalized == null)
+        }
     }
 
     fun removeSavedLocation(location: SavedLocation) {
-        val updated = _savedLocations.value.filterNot {
-            it.name.equals(location.name, ignoreCase = true) &&
-                it.country.equals(location.country, ignoreCase = true)
-        }
+        val updated = _savedLocations.value.filterNot { isSameLocation(it, location) }
         _savedLocations.value = updated
         repository.saveLocations(updated)
+        val activeCustom = _selectedCustomLocation.value
+        if (activeCustom != null && isSameLocation(activeCustom, location)) {
+            selectLocation(null)
+        }
+    }
+
+    private fun isSameLocation(a: SavedLocation, b: SavedLocation): Boolean {
+        return a.name.equals(b.name, ignoreCase = true) &&
+            a.country.equals(b.country, ignoreCase = true) &&
+            a.adminArea.equals(b.adminArea, ignoreCase = true)
     }
 
     private fun fetchAndSetWeatherData(showInitialLoading: Boolean = false, forceFreshLocation: Boolean = false) {
+        val requestId = ++latestRequestId
         activeJob = viewModelScope.launch {
-            if (_uiState.value !is WeatherUiState.Success) {
+            if (showInitialLoading || _uiState.value !is WeatherUiState.Success) {
                 _uiState.value = WeatherUiState.Loading
+                _isRefreshing.value = false
             } else {
                 _isRefreshing.value = true
             }
@@ -149,6 +164,7 @@ class WeatherViewModel @JvmOverloads constructor(
                         altitude = coords.altitude
                     )
                 }
+                if (requestId != latestRequestId) return@launch
                 lastFetchTimestampMs = System.currentTimeMillis()
                 _uiState.value = WeatherUiState.Success(data)
                 com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
@@ -165,6 +181,7 @@ class WeatherViewModel @JvmOverloads constructor(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
+                if (requestId != latestRequestId) return@launch
                 Log.e("WeatherViewModel", "Error loading weather data", e)
                 if (_uiState.value !is WeatherUiState.Success) {
                     val fallback = repository.getCachedWeatherData()
@@ -175,7 +192,9 @@ class WeatherViewModel @JvmOverloads constructor(
                     }
                 }
             } finally {
-                _isRefreshing.value = false
+                if (requestId == latestRequestId) {
+                    _isRefreshing.value = false
+                }
             }
         }
     }

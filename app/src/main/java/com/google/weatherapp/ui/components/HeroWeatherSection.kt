@@ -175,7 +175,11 @@ fun HeroWeatherSection(
                 )
                 if (hero.lastUpdatedEpochMs > 0L) {
                     val minutesAgo = ((System.currentTimeMillis() - hero.lastUpdatedEpochMs) / 60000L).coerceAtLeast(0)
-                    val updateLabel = if (minutesAgo < 1) "Just now" else "${minutesAgo}m ago"
+                    val updateLabel = when {
+                        minutesAgo < 1 -> "Just now"
+                        minutesAgo < 60 -> "${minutesAgo}m ago"
+                        else -> "${minutesAgo / 60}h ago"
+                    }
                     Text(
                         text = "•",
                         style = MaterialTheme.typography.labelSmall,
@@ -190,8 +194,8 @@ fun HeroWeatherSection(
             }
 
             // 6. Generative Editorial "Weather Story" Frosted Glass Card
-            val storyKey = remember(hero.locationName, hero.tempDegrees, hero.conditionText) {
-                Triple(hero.locationName, hero.tempDegrees, hero.conditionText)
+            val storyKey = remember(hero.locationName, hero.tempDegrees, hero.conditionText, hero.isDaytime) {
+                "${hero.locationName}_${hero.tempDegrees}_${hero.conditionText}_${hero.isDaytime}"
             }
             var weatherStory by remember(storyKey) {
                 mutableStateOf<String?>(hero.weatherStory)

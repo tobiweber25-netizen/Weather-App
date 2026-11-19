@@ -609,7 +609,8 @@ object WeatherNotificationScheduler {
             WeatherRepository(localDataSource = null).getWeatherData(
                 latitude = coords.latitude,
                 longitude = coords.longitude,
-                resolvedLocationName = coords.locationName
+                resolvedLocationName = coords.locationName,
+                altitude = coords.altitude
             ).also { local.saveDeviceWeather(it) }
         } catch (_: Exception) {
             local.getDeviceWeather()

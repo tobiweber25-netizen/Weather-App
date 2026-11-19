@@ -10,6 +10,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
+import java.time.OffsetDateTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -55,7 +56,9 @@ internal object WeatherMapper {
                 descText.contains("rain", ignoreCase = true) || descText.contains("drizzle", ignoreCase = true) ->
                 SkyThemeType.RAIN
             condType.contains("CLOUD", ignoreCase = true) || condType.contains("OVERCAST", ignoreCase = true) ||
-                descText.contains("cloud", ignoreCase = true) || descText.contains("overcast", ignoreCase = true) ->
+                condType.contains("FOG", ignoreCase = true) || condType.contains("MIST", ignoreCase = true) ||
+                descText.contains("cloud", ignoreCase = true) || descText.contains("overcast", ignoreCase = true) ||
+                descText.contains("fog", ignoreCase = true) || descText.contains("mist", ignoreCase = true) ->
                 SkyThemeType.OVERCAST
             !isDay -> SkyThemeType.CLEAR_NIGHT
             else -> SkyThemeType.CLEAR_DAY
@@ -486,7 +489,8 @@ internal object WeatherMapper {
                 dayIdx = idx,
                 allGoogleHours = gHours,
                 omHourlyByDateHour = omHourlyByDateHour,
-                todayHoursFallback = hourlyItems
+                todayHoursFallback = hourlyItems,
+                zoneId = zoneId
             )
             val hourlyMax = dayHourly.maxOfOrNull { it.tempDegrees }
             val hourlyMin = dayHourly.minOfOrNull { it.tempDegrees }
@@ -565,7 +569,7 @@ internal object WeatherMapper {
                 dayWindSpeedKmH = morningWindSpeed,
                 dayWindDirection = morningWindDir,
                 nightWindSpeedKmH = nightWind?.speed?.value?.roundToInt() ?: 0,
-                nightWindDirection = nightWind?.direction?.cardinal ?: "—",
+                nightWindDirection = parseCardinal(nightWind?.direction?.cardinal),
                 hourlyForecast = alignHourlyExtremes(dayHourly, blendedMax, blendedMin),
                 confidencePercent = dayConfidence,
                 modelSpreadDegrees = daySpread
@@ -630,23 +634,24 @@ internal object WeatherMapper {
             ?: hourlyItems.firstOrNull()?.uvIndex
             ?: 0
         val maxUv = todayForecast?.daytimeForecast?.uvIndex
-            ?: omForecast?.daily?.uvIndexMax?.firstOrNull()?.roundToInt()
+            ?: omForecast?.daily?.uvIndexMax?.getOrNull(todayOmIdx)?.roundToInt()
             ?: uvVal
         val uvCat = categorizeUv(uvVal)
 
         val dewPoint = current.dewPoint?.degrees?.roundToInt() ?: (blendedCurrentTemp - ((100 - humidity) / 5))
         val pressure = current.airPressure?.meanSeaLevelMillibars?.roundToInt()
+            ?: omForecast?.current?.pressureMsl?.roundToInt()
             ?: omForecast?.current?.surfacePressure?.roundToInt()
             ?: 1013
 
         val sunEvents = todayForecast?.sunEvents ?: current.sunEvents
         val sunriseStr = formatIsoTime(
-            sunEvents?.sunriseTime ?: omForecast?.daily?.sunrise?.firstOrNull(),
+            sunEvents?.sunriseTime ?: omForecast?.daily?.sunrise?.getOrNull(todayOmIdx),
             zoneId,
             fallback = "06:15"
         )
         val sunsetStr = formatIsoTime(
-            sunEvents?.sunsetTime ?: omForecast?.daily?.sunset?.firstOrNull(),
+            sunEvents?.sunsetTime ?: omForecast?.daily?.sunset?.getOrNull(todayOmIdx),
             zoneId,
             fallback = "18:15"
         )
@@ -821,6 +826,17 @@ internal object WeatherMapper {
                 omCurrent?.cloudCover ?: 20
             }
 
+            val amWindLabel = when {
+                dWindSpeed > 0 && dWindDir != "—" -> "AM: $dWindSpeed km/h $dWindDir"
+                dWindSpeed == 0 -> "AM: Calm"
+                else -> "AM: —"
+            }
+            val pmWindLabel = when {
+                dWindSpeed > 0 && dWindDir != "—" -> "PM: $dWindSpeed km/h $dWindDir"
+                dWindSpeed == 0 -> "PM: Calm"
+                else -> "PM: —"
+            }
+
             DailyItem(
                 dayLabel = dayLabel,
                 dateText = dateText,
@@ -829,8 +845,8 @@ internal object WeatherMapper {
                 rainProbability = boundedDayPop,
                 iconUri = null,
                 conditionText = dCond,
-                morningWind = "AM: $dWindSpeed km/h $dWindDir",
-                afternoonWind = "PM: $dWindSpeed km/h $dWindDir",
+                morningWind = amWindLabel,
+                afternoonWind = pmWindLabel,
                 fullDateString = fullDateStr,
                 feelsLikeMaxTemp = omForecast.daily?.apparentTemperatureMax?.getOrNull(idx)?.roundToInt() ?: dayMax,
                 feelsLikeMinTemp = omForecast.daily?.apparentTemperatureMin?.getOrNull(idx)?.roundToInt() ?: dayMin,
@@ -913,7 +929,7 @@ internal object WeatherMapper {
             uvCategory = categorizeUv(currentUv),
             humidityPercent = humidity,
             dewPointDegrees = currentTemp - ((100 - humidity) / 5),
-            pressureHpa = omCurrent?.surfacePressure?.roundToInt() ?: 1013,
+            pressureHpa = omCurrent?.pressureMsl?.roundToInt() ?: omCurrent?.surfacePressure?.roundToInt() ?: 1013,
             sunriseTime = sunriseToday,
             sunsetTime = sunsetToday,
             aqiValue = usAqi,
@@ -925,14 +941,54 @@ internal object WeatherMapper {
             feelsLikeReason = feelsReason
         )
 
+        val hourlyStormList = hourlyItems.map { it.thunderstormProbability }
+        val currentStormProb = if (wmoCode in 95..99) 70 else 0
+        val peakIdx = hourlyStormList.indices.maxByOrNull { hourlyStormList[it] } ?: -1
+        val peakHourlyProb = if (peakIdx >= 0) hourlyStormList[peakIdx] else 0
+        val stormProb = maxOf(currentStormProb, peakHourlyProb)
+        val peakHourLabel = when {
+            peakIdx > 0 && peakHourlyProb > 0 -> {
+                val rawLabel = hourlyItems.getOrNull(peakIdx)?.hourLabel
+                if (!rawLabel.isNullOrBlank() && currentLocalHour + peakIdx >= 24 && !rawLabel.startsWith("Tomorrow", ignoreCase = true)) {
+                    "Tomorrow $rawLabel"
+                } else {
+                    rawLabel
+                }
+            }
+            (peakIdx == 0 && peakHourlyProb > 0) || currentStormProb > 0 -> "Now"
+            else -> null
+        }
+        val (riskLevel, alertTitle, alertSubtitle) = when {
+            stormProb >= 60 || wmoCode in 95..99 -> Triple(
+                SeverityRiskLevel.SEVERE,
+                "SEVERE THUNDERSTORM WARNING",
+                "High storm risk ($stormProb% peak probability). Open-Meteo high-res feed active."
+            )
+            stormProb >= 30 -> Triple(
+                SeverityRiskLevel.HIGH,
+                "THUNDERSTORM WATCH",
+                "Elevated storm risk ($stormProb% peak probability). Open-Meteo high-res feed active."
+            )
+            stormProb >= 10 -> Triple(
+                SeverityRiskLevel.MODERATE,
+                "ISOLATED THUNDERSTORM RISK",
+                "Localized storm potential ($stormProb% peak probability). Open-Meteo high-res feed active."
+            )
+            else -> Triple(
+                SeverityRiskLevel.LOW,
+                "THUNDERSTORM TRACKER: CLEAR",
+                "No significant thunderstorm cells detected in the next 24 hours."
+            )
+        }
+
         val alert = SevereAlertInfo(
-            riskLevel = if (wmoCode in 95..99) SeverityRiskLevel.HIGH else SeverityRiskLevel.LOW,
-            thunderstormProbability = if (wmoCode in 95..99) 70 else 0,
-            title = if (wmoCode in 95..99) "THUNDERSTORM WATCH" else "THUNDERSTORM TRACKER: CLEAR",
-            subtitle = "ECMWF multi-model fallback active.",
+            riskLevel = riskLevel,
+            thunderstormProbability = stormProb,
+            title = alertTitle,
+            subtitle = alertSubtitle,
             isVisible = true,
-            peakHourLabel = null,
-            hourlyStormProbabilities = hourlyItems.map { it.thunderstormProbability }
+            peakHourLabel = peakHourLabel,
+            hourlyStormProbabilities = hourlyStormList
         )
 
         return WeatherDashboardData(
@@ -1039,15 +1095,17 @@ internal object WeatherMapper {
         dayIdx: Int,
         allGoogleHours: List<ForecastHour>,
         omHourlyByDateHour: Map<String, OmHourSlot>,
-        todayHoursFallback: List<HourlyItem>
+        todayHoursFallback: List<HourlyItem>,
+        zoneId: ZoneId
     ): List<HourlyItem> {
+        val locationToday = LocalDate.now(zoneId)
         val targetDate = localDate ?: day.displayDate?.let {
             try {
-                LocalDate.of(it.year ?: LocalDate.now().year, it.month ?: 1, it.day ?: 1)
+                LocalDate.of(it.year ?: locationToday.year, it.month ?: 1, it.day ?: 1)
             } catch (_: Exception) {
                 null
             }
-        } ?: LocalDate.now().plusDays(dayIdx.toLong())
+        } ?: locationToday.plusDays(dayIdx.toLong())
 
         val dayYear = targetDate.year
         val dayMonth = targetDate.monthValue
@@ -1093,7 +1151,7 @@ internal object WeatherMapper {
             return dayHours
         }
 
-        if (dayIdx == 0 && targetDate == LocalDate.now() && todayHoursFallback.isNotEmpty()) {
+        if (dayIdx == 0 && targetDate == locationToday && todayHoursFallback.isNotEmpty()) {
             return todayHoursFallback
         }
         return emptyList()
@@ -1161,11 +1219,18 @@ internal object WeatherMapper {
         return hourlyList
     }
 
-    private fun formatIsoTime(isoString: String?, zoneId: ZoneId, fallback: String): String {
+    private fun hasIsoTimezoneOffset(isoString: String): Boolean {
+        val timePart = isoString.substringAfter("T", "")
+        return isoString.endsWith("Z", ignoreCase = true) ||
+            timePart.contains("+") ||
+            timePart.contains("-")
+    }
+
+    internal fun formatIsoTime(isoString: String?, zoneId: ZoneId, fallback: String): String {
         if (isoString.isNullOrBlank()) return fallback
         return try {
-            if (isoString.endsWith("Z") || isoString.contains("+")) {
-                val instant = Instant.parse(isoString)
+            if (hasIsoTimezoneOffset(isoString)) {
+                val instant = OffsetDateTime.parse(isoString).toInstant()
                 DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
                     .withZone(zoneId)
                     .format(instant)
@@ -1203,8 +1268,8 @@ internal object WeatherMapper {
         for (i in times.indices) {
             val tStr = times[i]
             val slotTime = try {
-                if (tStr.endsWith("Z") || tStr.contains("+")) {
-                    ZonedDateTime.parse(tStr).withZoneSameInstant(zoneId).toLocalDateTime().truncatedTo(ChronoUnit.MINUTES)
+                if (hasIsoTimezoneOffset(tStr)) {
+                    OffsetDateTime.parse(tStr).atZoneSameInstant(zoneId).toLocalDateTime().truncatedTo(ChronoUnit.MINUTES)
                 } else {
                     LocalDateTime.parse(tStr).truncatedTo(ChronoUnit.MINUTES)
                 }

@@ -395,7 +395,7 @@ private fun DrawScope.drawParallaxRainAtmosphere(
 
     // Layer 3: Midground rain streaks with gentle gradient tail
     for (i in 0 until 14) {
-        val progress = (fastPhase * 1.8f + (i * 0.219f)) % 1f
+        val progress = (fastPhase * 2f + (i * 0.219f)) % 1f
         val xStart = width * ((i * 0.193f) % 1.15f) - progress * width * slantRatio
         val yStart = -lenMidPx + progress * (height + lenMidPx * 2f)
         val xEnd = xStart - lenMidPx * slantRatio
@@ -420,7 +420,7 @@ private fun DrawScope.drawParallaxRainAtmosphere(
 
     // Layer 4: Sparse foreground soft droplets
     for (i in 0 until 6) {
-        val progress = (fastPhase * 2.6f + (i * 0.311f)) % 1f
+        val progress = (fastPhase * 3f + (i * 0.311f)) % 1f
         val xStart = width * ((i * 0.271f) % 1.15f) - progress * width * slantRatio
         val yStart = -lenFgPx + progress * (height + lenFgPx * 2f)
         val xEnd = xStart - lenFgPx * slantRatio
