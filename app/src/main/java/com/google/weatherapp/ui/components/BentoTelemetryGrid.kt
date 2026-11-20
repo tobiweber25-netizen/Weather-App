@@ -125,7 +125,9 @@ fun BentoTelemetryGrid(
                 modifier = Modifier.weight(1f)
             )
 
+            val isStationPressure = telemetry.pressureLabel.contains("Station", ignoreCase = true)
             val pressureMood = when {
+                isStationPressure -> "Station pressure"
                 telemetry.pressureHpa < 1005 -> "Low pressure"
                 telemetry.pressureHpa > 1022 -> "High pressure"
                 else -> "Steady · Sea level"
@@ -276,6 +278,8 @@ fun BentoTelemetryGrid(
             val isAqiAvailable = telemetry.aqiCategory != "Unavailable" && telemetry.aqiCategory != "N/A"
             val aqiDisplay = if (isAqiAvailable) "${telemetry.aqiValue}" else "—"
             val aqiSubtitle = when {
+                isAqiAvailable && telemetry.dominantPollutantLabel.isNotBlank() && telemetry.dominantPollutantLabel != "Air sensor active" ->
+                    "${telemetry.aqiCategory} · ${telemetry.dominantPollutantLabel}"
                 isAqiAvailable && telemetry.pm25 > 0.0 -> "${telemetry.aqiCategory} · PM2.5 ${telemetry.pm25}"
                 isAqiAvailable -> telemetry.aqiCategory
                 else -> "Sensor unavailable"

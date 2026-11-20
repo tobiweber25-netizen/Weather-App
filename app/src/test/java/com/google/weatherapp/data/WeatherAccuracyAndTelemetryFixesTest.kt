@@ -92,10 +92,10 @@ class WeatherAccuracyAndTelemetryFixesTest {
 
         val nowCard = result.hourlyList.first()
         assertEquals("Now", nowCard.hourLabel)
-        // Should blend maxOf(50, 70) = 70 instead of 0
-        assertEquals(70, nowCard.rainProbability)
-        // Should blend maxOf(1.8, 2.5) = 2.5 instead of 0.0
-        assertEquals(2.5, nowCard.precipitationMm, 0.001)
+        // Should use calibrated weighted blend between Google (50%) and Open-Meteo (70%) instead of 0 or inflated maxOf
+        assertTrue("Expected calibrated rainProbability in 51..69, got ${nowCard.rainProbability}", nowCard.rainProbability in 51..69)
+        // Should use calibrated weighted blend between Google (1.8 mm) and Open-Meteo (2.5 mm) instead of 0.0 or inflated maxOf
+        assertTrue("Expected calibrated precipitationMm in 1.85..2.45, got ${nowCard.precipitationMm}", nowCard.precipitationMm in 1.85..2.45)
     }
 
     @Test

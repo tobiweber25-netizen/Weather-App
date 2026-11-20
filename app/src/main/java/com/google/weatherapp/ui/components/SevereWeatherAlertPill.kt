@@ -119,8 +119,18 @@ fun SevereWeatherAlertPill(
                         color = contentColor,
                         maxLines = 1
                     )
+                    val topOfficial = alert.officialAlerts.firstOrNull()
+                    val headerMeta = if (topOfficial != null && alert.sourceLabel != null) {
+                        buildString {
+                            append(alert.sourceLabel)
+                            if (topOfficial.areaName.isNotBlank()) append(" · ${topOfficial.areaName}")
+                            if (topOfficial.expiresLabel.isNotBlank()) append(" · Until ${topOfficial.expiresLabel}")
+                        }
+                    } else {
+                        "24h Storm Probability: ${alert.thunderstormProbability}%$peakSuffix"
+                    }
                     Text(
-                        text = "24h Storm Probability: ${alert.thunderstormProbability}%$peakSuffix",
+                        text = headerMeta,
                         style = MaterialTheme.typography.labelSmall,
                         color = contentColor.copy(alpha = 0.88f),
                         maxLines = 1
@@ -148,6 +158,21 @@ fun SevereWeatherAlertPill(
                     style = MaterialTheme.typography.bodyMedium,
                     color = contentColor
                 )
+
+                val topInstruction = alert.officialAlerts.firstOrNull()?.instruction
+                if (!topInstruction.isNullOrBlank()) {
+                    Text(
+                        text = "SAFETY GUIDANCE",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = contentColor.copy(alpha = 0.85f)
+                    )
+                    Text(
+                        text = topInstruction,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = contentColor.copy(alpha = 0.92f)
+                    )
+                }
 
                 if (alert.hourlyStormProbabilities.any { it > 0 }) {
                     Text(

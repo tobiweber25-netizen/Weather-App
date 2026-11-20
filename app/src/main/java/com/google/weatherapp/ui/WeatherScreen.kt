@@ -650,6 +650,8 @@ fun WeatherScreen(
                                                 hero = data.hero,
                                                 hourlyList = data.hourlyList,
                                                 nowcast = data.nowcast,
+                                                telemetry = data.telemetry,
+                                                alert = data.alert,
                                                 onLocationClick = { showLocationPicker = true },
                                                 modifier = widgetModifier
                                             )

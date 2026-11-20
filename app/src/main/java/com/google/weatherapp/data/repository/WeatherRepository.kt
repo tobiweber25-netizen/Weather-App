@@ -26,6 +26,7 @@ class WeatherRepository(
     private val openMeteoService: OpenMeteoForecastService = ApiClient.openMeteoForecastService,
     private val airQualityService: OpenMeteoAirQualityService = ApiClient.openMeteoAirQualityService,
     private val geocodingService: OpenMeteoGeocodingService = ApiClient.openMeteoGeocodingService,
+    private val sawsAlertClient: SawsAlertClient = SawsAlertClient(),
     private val apiKey: String = BuildConfig.GOOGLE_WEATHER_API_KEY,
     private val localDataSource: WeatherLocalDataSource? = null
 ) {
@@ -122,20 +123,54 @@ class WeatherRepository(
                         )
                     }
                 }
+                val googleAlertsDeferred = async {
+                    safeCall("Google publicAlerts") {
+                        apiService.getPublicAlerts(
+                            apiKey = apiKey,
+                            latitude = latitude,
+                            longitude = longitude
+                        )
+                    }
+                }
+                val sawsAlertsDeferred = async {
+                    safeCall("SAWS CAP alerts") {
+                        sawsAlertClient.fetchAlertsForLocation(
+                            latitude = latitude,
+                            longitude = longitude
+                        )
+                    } ?: emptyList()
+                }
                 val regionalModels = resolveBestRegionalModels(latitude, longitude)
+                val useNativeMinutely = WeatherConsensus.hasNative15MinNowcast(latitude, longitude)
                 val openMeteoDeferred = async {
+                    // Never pass raw phone GPS altitude (WGS84 / noisy / often 0.0 on network fixes):
+                    // let Open-Meteo use its built-in 90m Copernicus terrain DEM to match Google Weather.
                     safeCall("Open-Meteo regional") {
                         openMeteoService.getForecast(
                             latitude = latitude,
                             longitude = longitude,
-                            elevation = altitude,
+                            minutely15 = if (useNativeMinutely) "precipitation,precipitation_probability,weather_code" else null,
+                            forecastMinutely15 = if (useNativeMinutely) 96 else null,
+                            elevation = null,
                             models = regionalModels
                         )
                     } ?: safeCall("Open-Meteo default") {
                         openMeteoService.getForecast(
                             latitude = latitude,
                             longitude = longitude,
-                            elevation = altitude
+                            minutely15 = if (useNativeMinutely) "precipitation,precipitation_probability,weather_code" else null,
+                            forecastMinutely15 = if (useNativeMinutely) 96 else null,
+                            elevation = null
+                        )
+                    }
+                }
+                val consensusDeferred = async {
+                    safeCall("Open-Meteo multi-model consensus") {
+                        WeatherConsensus.parseMultiModelConsensus(
+                            openMeteoService.getMultiModelConsensus(
+                                latitude = latitude,
+                                longitude = longitude
+                            )
                         )
                     }
                 }
@@ -148,7 +183,10 @@ class WeatherRepository(
                 val gCurrent = googleCurrentDeferred.await()
                 val gHourly = googleHourlyDeferred.await()
                 val gDaily = googleDailyDeferred.await()
+                val gAlerts = googleAlertsDeferred.await()
+                val sawsAlerts = sawsAlertsDeferred.await()
                 val omForecast = openMeteoDeferred.await()
+                val omConsensus = consensusDeferred.await()
                 val omAqi = airQualityDeferred.await()
 
                 val result = when {
@@ -160,14 +198,20 @@ class WeatherRepository(
                         omAqi = omAqi,
                         resolvedLocationName = resolvedLocationName,
                         latitude = latitude,
-                        longitude = longitude
+                        longitude = longitude,
+                        omConsensus = omConsensus,
+                        googleAlerts = gAlerts,
+                        sawsAlerts = sawsAlerts
                     )
                     omForecast != null -> WeatherMapper.mapOpenMeteoFallbackDashboardData(
                         omForecast = omForecast,
                         omAqi = omAqi,
                         resolvedLocationName = resolvedLocationName,
                         latitude = latitude,
-                        longitude = longitude
+                        longitude = longitude,
+                        omConsensus = omConsensus,
+                        googleAlerts = gAlerts,
+                        sawsAlerts = sawsAlerts
                     )
                     else -> throw IllegalStateException("Both Google Weather and Open-Meteo forecast feeds failed")
                 }

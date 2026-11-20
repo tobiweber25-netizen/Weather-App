@@ -1,5 +1,6 @@
 package com.google.weatherapp.data.api
 
+import com.google.gson.JsonObject
 import com.google.gson.annotations.SerializedName
 import retrofit2.http.GET
 import retrofit2.http.Query
@@ -9,8 +10,8 @@ interface OpenMeteoForecastService {
     suspend fun getForecast(
         @Query("latitude") latitude: Double,
         @Query("longitude") longitude: Double,
-        @Query("current") current: String = "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
-        @Query("hourly") hourly: String = "temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,relative_humidity_2m,visibility,is_day,cloud_cover",
+        @Query("current") current: String = "temperature_2m,relative_humidity_2m,apparent_temperature,dew_point_2m,is_day,precipitation,weather_code,cloud_cover,pressure_msl,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m",
+        @Query("hourly") hourly: String = "temperature_2m,apparent_temperature,dew_point_2m,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index,relative_humidity_2m,visibility,is_day,cloud_cover,cape",
         @Query("daily") daily: String = "weather_code,temperature_2m_max,temperature_2m_min,apparent_temperature_max,apparent_temperature_min,sunrise,sunset,uv_index_max,precipitation_sum,precipitation_probability_max,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant",
         @Query("minutely_15") minutely15: String? = "precipitation,precipitation_probability,weather_code",
         @Query("forecast_minutely_15") forecastMinutely15: Int? = 96,
@@ -19,6 +20,17 @@ interface OpenMeteoForecastService {
         @Query("timezone") timezone: String = "auto",
         @Query("forecast_days") forecastDays: Int = 10
     ): OpenMeteoForecastResponse
+
+    @GET("v1/forecast")
+    suspend fun getMultiModelConsensus(
+        @Query("latitude") latitude: Double,
+        @Query("longitude") longitude: Double,
+        @Query("hourly") hourly: String = "temperature_2m,precipitation,precipitation_probability",
+        @Query("daily") daily: String = "temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max",
+        @Query("models") models: String = "best_match,ecmwf_ifs,ecmwf_aifs025_single,ukmo_seamless,icon_seamless,gfs_seamless",
+        @Query("timezone") timezone: String = "auto",
+        @Query("forecast_days") forecastDays: Int = 10
+    ): JsonObject
 }
 
 interface OpenMeteoAirQualityService {
@@ -26,7 +38,7 @@ interface OpenMeteoAirQualityService {
     suspend fun getAirQuality(
         @Query("latitude") latitude: Double,
         @Query("longitude") longitude: Double,
-        @Query("current") current: String = "us_aqi,european_aqi,pm10,pm2_5",
+        @Query("current") current: String = "us_aqi,european_aqi,pm10,pm2_5,ozone,nitrogen_dioxide",
         @Query("timezone") timezone: String = "auto"
     ): OpenMeteoAirQualityResponse
 }
@@ -62,6 +74,7 @@ data class OpenMeteoCurrent(
     @SerializedName("temperature_2m") val temperature2m: Double? = null,
     @SerializedName("relative_humidity_2m") val relativeHumidity2m: Int? = null,
     @SerializedName("apparent_temperature") val apparentTemperature: Double? = null,
+    @SerializedName("dew_point_2m") val dewPoint2m: Double? = null,
     @SerializedName("is_day") val isDay: Int? = null,
     @SerializedName("precipitation") val precipitation: Double? = null,
     @SerializedName("weather_code") val weatherCode: Int? = null,
@@ -77,6 +90,7 @@ data class OpenMeteoHourly(
     @SerializedName("time") val time: List<String>? = null,
     @SerializedName("temperature_2m") val temperature2m: List<Double?>? = null,
     @SerializedName("apparent_temperature") val apparentTemperature: List<Double?>? = null,
+    @SerializedName("dew_point_2m") val dewPoint2m: List<Double?>? = null,
     @SerializedName("precipitation_probability") val precipitationProbability: List<Int?>? = null,
     @SerializedName("precipitation") val precipitation: List<Double?>? = null,
     @SerializedName("weather_code") val weatherCode: List<Int?>? = null,
@@ -87,7 +101,8 @@ data class OpenMeteoHourly(
     @SerializedName("relative_humidity_2m") val relativeHumidity2m: List<Int?>? = null,
     @SerializedName("visibility") val visibility: List<Double?>? = null,
     @SerializedName("is_day") val isDay: List<Int?>? = null,
-    @SerializedName("cloud_cover") val cloudCover: List<Int?>? = null
+    @SerializedName("cloud_cover") val cloudCover: List<Int?>? = null,
+    @SerializedName("cape") val cape: List<Double?>? = null
 )
 
 data class OpenMeteoDaily(
@@ -115,7 +130,9 @@ data class OpenMeteoAirQualityCurrent(
     @SerializedName("us_aqi") val usAqi: Int? = null,
     @SerializedName("european_aqi") val europeanAqi: Int? = null,
     @SerializedName("pm10") val pm10: Double? = null,
-    @SerializedName("pm2_5") val pm25: Double? = null
+    @SerializedName("pm2_5") val pm25: Double? = null,
+    @SerializedName("ozone") val ozone: Double? = null,
+    @SerializedName("nitrogen_dioxide") val nitrogenDioxide: Double? = null
 )
 
 data class OpenMeteoGeocodingResponse(

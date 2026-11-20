@@ -46,7 +46,11 @@ class WeatherViewModel @JvmOverloads constructor(
     fun hasLocationPermission(): Boolean = locationClient.hasLocationPermission()
 
     init {
-        val cached = repository.getCachedWeatherData()
+        val lastCoords = if (_selectedCustomLocation.value == null) locationClient.getCachedCoordinates() else null
+        val cached = repository.getCachedWeatherData(
+            latitude = lastCoords?.latitude,
+            longitude = lastCoords?.longitude
+        )
         if (cached != null) {
             _uiState.value = WeatherUiState.Success(cached)
             fetchAndSetWeatherData(showInitialLoading = false)

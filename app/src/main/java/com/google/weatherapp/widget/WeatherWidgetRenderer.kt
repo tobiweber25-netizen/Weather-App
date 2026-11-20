@@ -100,6 +100,30 @@ object WeatherWidgetRenderer {
         return bitmap
     }
 
+    /**
+     * Advances the hourly forecast window when cached widget data ages by >= 1 hour so widgets
+     * never freeze on a stale "Now" slot between background refreshes.
+     */
+    internal fun resolveFreshHourlySlice(
+        weather: WeatherDashboardData,
+        count: Int,
+        nowEpochMs: Long = System.currentTimeMillis()
+    ): List<HourlyItem> {
+        val list = weather.hourlyList
+        if (list.isEmpty() || count <= 0) return emptyList()
+        val updatedAt = weather.hero.lastUpdatedEpochMs
+        if (updatedAt <= 0L || nowEpochMs <= updatedAt) return list.take(count)
+
+        val elapsedHours = ((nowEpochMs - updatedAt) / 3_600_000L).toInt().coerceAtLeast(0)
+        if (elapsedHours <= 0 || elapsedHours >= list.size) return list.take(count)
+
+        val shifted = list.drop(elapsedHours).take(count)
+        if (shifted.isEmpty()) return list.take(count)
+        return shifted.mapIndexed { idx, item ->
+            if (idx == 0) item.copy(hourLabel = "Now") else item
+        }
+    }
+
     private fun drawCardBackground(
         canvas: Canvas,
         w: Float,
@@ -371,11 +395,11 @@ object WeatherWidgetRenderer {
         }
         canvas.drawLine(splitX, pad, splitX, h - pad, divPaint)
 
-        // Right side: Upcoming 4 hours
+        // Right side: Upcoming 4 hours (shifted forward if cached data is > 1 hour old)
         val rightLeft = splitX + SpacingTokens.Medium.value * density
         val rightRight = w - pad
         val rightW = rightRight - rightLeft
-        val hours = weather.hourlyList.take(4)
+        val hours = resolveFreshHourlySlice(weather, count = 4)
         if (hours.isEmpty()) return
 
         val colW = rightW / hours.size
@@ -512,7 +536,7 @@ object WeatherWidgetRenderer {
         }
         canvas.drawLine(pad, headerBottomY, w - pad, headerBottomY, divPaint)
 
-        val hours = weather.hourlyList.take(6)
+        val hours = resolveFreshHourlySlice(weather, count = 6)
         if (hours.isEmpty()) return
 
         val stripTop = headerBottomY + 8f * density

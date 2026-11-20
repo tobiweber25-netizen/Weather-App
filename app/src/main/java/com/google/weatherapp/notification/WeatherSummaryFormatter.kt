@@ -251,33 +251,46 @@ object WeatherSummaryFormatter {
             "Rain alert"
         }
 
-        val rate = nowcast.maxRateMmH
+        val effectiveRate = if (nowcast.nextPrecipitationOnsetMinutes != null && nowcast.onsetRateMmH > 0.0) {
+            nowcast.onsetRateMmH
+        } else {
+            nowcast.maxRateMmH
+        }
         val intensityLabel = when {
-            rate >= 4.0 -> "Heavy rain"
-            rate >= 1.0 -> "Moderate rain"
+            effectiveRate >= 4.0 -> "Heavy rain"
+            effectiveRate >= 1.0 -> "Moderate rain"
             else -> "Light rain"
         }
+        val rateClause = if (effectiveRate >= 0.1) " (~$effectiveRate mm/h)" else ""
 
         val onset = nowcast.nextPrecipitationOnsetMinutes
         val conciseText = when {
+            !nowcast.isHighRes15Min ->
+                nowcast.summaryText.trim().removeSuffix(".") + " — grab an umbrella."
             onset != null && onset <= 5 ->
-                "$intensityLabel starting right now (~${nowcast.maxRateMmH} mm/h) — grab an umbrella."
+                "$intensityLabel starting right now$rateClause — grab an umbrella."
             onset != null ->
-                "$intensityLabel starting in ~$onset min (~${nowcast.maxRateMmH} mm/h) — grab an umbrella."
+                "$intensityLabel starting in ~$onset min$rateClause — grab an umbrella."
             else ->
                 nowcast.summaryText
         }
 
-        val activeIntervals = nowcast.intervals.count { it.precipMm >= 0.1 || it.probabilityPercent >= 50 }
-        val durationGuidance = if (activeIntervals > 0) {
-            "Expected across the next ~${activeIntervals * 15} min — keep an umbrella handy."
-        } else {
-            "Wet conditions arriving shortly — keep an umbrella handy."
+        val activeIntervals = nowcast.intervals.count { it.precipMm >= 0.1 }
+        val durationGuidance = when {
+            !nowcast.isHighRes15Min && activeIntervals > 0 ->
+                "Expected across the next ~$activeIntervals hour${if (activeIntervals == 1) "" else "s"} — keep an umbrella handy."
+            activeIntervals > 0 ->
+                "Expected across the next ~${activeIntervals * 15} min — keep an umbrella handy."
+            else ->
+                "Wet conditions arriving shortly — keep an umbrella handy."
         }
-        val leadSentence = if (onset != null) {
-            "$intensityLabel starting in ~$onset min (~${nowcast.maxRateMmH} mm/h)."
-        } else {
-            nowcast.summaryText.trim().removeSuffix(".") + "."
+        val leadSentence = when {
+            !nowcast.isHighRes15Min ->
+                nowcast.summaryText.trim().removeSuffix(".") + "."
+            onset != null ->
+                "$intensityLabel starting in ~$onset min$rateClause."
+            else ->
+                nowcast.summaryText.trim().removeSuffix(".") + "."
         }
         val expandedDetails = "$leadSentence\n$durationGuidance"
 

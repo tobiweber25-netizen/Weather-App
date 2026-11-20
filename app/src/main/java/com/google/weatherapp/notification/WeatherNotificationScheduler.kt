@@ -313,10 +313,17 @@ object WeatherNotificationScheduler {
     // Alert Detection Rules
     fun isSevereAlert(alert: SevereAlertInfo): Boolean {
         if (!alert.isVisible || alert.riskLevel == SeverityRiskLevel.LOW) return false
-        if (alert.peakHourLabel?.startsWith("Tomorrow", ignoreCase = true) == true) return false
+        if (alert.officialAlerts.any { it.severity == SeverityRiskLevel.HIGH || it.severity == SeverityRiskLevel.SEVERE }) {
+            return true
+        }
         if (alert.hourlyStormProbabilities.isNotEmpty()) {
             val nearTermMax = alert.hourlyStormProbabilities.take(6).maxOrNull() ?: 0
             if (nearTermMax < 30) return false
+        } else if (alert.peakHourLabel?.startsWith("Tomorrow", ignoreCase = true) == true) {
+            // Only suppress "Tomorrow" labels when we have no hourly curve to verify proximity;
+            // otherwise nearTermMax (next 6 hours) accurately permits imminent post-midnight storms
+            // while blocking distant storms 18 hours away.
+            return false
         }
         return alert.riskLevel == SeverityRiskLevel.HIGH ||
             alert.riskLevel == SeverityRiskLevel.SEVERE ||
@@ -325,6 +332,7 @@ object WeatherNotificationScheduler {
 
     fun isQuietHoursExemptSevereAlert(alert: SevereAlertInfo): Boolean {
         if (!isSevereAlert(alert)) return false
+        if (alert.officialAlerts.any { it.severity == SeverityRiskLevel.SEVERE }) return true
         if (alert.riskLevel != SeverityRiskLevel.SEVERE && alert.thunderstormProbability < 60) return false
         if (alert.hourlyStormProbabilities.isNotEmpty()) {
             val imminentMax = alert.hourlyStormProbabilities.take(3).maxOrNull() ?: 0
@@ -459,8 +467,11 @@ object WeatherNotificationScheduler {
         }
 
         val dailyList = data.dailyList
-        val today = dailyList.firstOrNull() ?: createFallbackDashboardData(zoneId).dailyList[0]
-        val tomorrow = dailyList.getOrNull(1)
+        val todayLocalDate = Instant.ofEpochMilli(nowEpochMs).atZone(zoneId).toLocalDate()
+        val todayDateStr = "${todayLocalDate.monthValue}/${todayLocalDate.dayOfMonth}"
+        val todayIdx = dailyList.indexOfFirst { it.dateText == todayDateStr }.takeIf { it >= 0 } ?: 0
+        val today = dailyList.getOrNull(todayIdx) ?: createFallbackDashboardData(zoneId).dailyList[0]
+        val tomorrow = dailyList.getOrNull(todayIdx + 1)
 
         // =========================================================================
         // TIER 2: Severe Hazards (Heat, Freeze, Gale, Dense Fog)

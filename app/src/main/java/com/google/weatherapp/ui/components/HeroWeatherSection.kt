@@ -26,10 +26,13 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import com.google.weatherapp.data.model.BentoTelemetry
 import com.google.weatherapp.data.model.HeroWeather
 import com.google.weatherapp.data.model.HourlyItem
 import com.google.weatherapp.data.model.PrecipitationNowcast
+import com.google.weatherapp.data.model.SevereAlertInfo
 import com.google.weatherapp.theme.*
+import kotlinx.coroutines.delay
 
 private val sharedAiService = AiWeatherStoryService()
 
@@ -38,6 +41,8 @@ fun HeroWeatherSection(
     hero: HeroWeather,
     hourlyList: List<HourlyItem> = emptyList(),
     nowcast: PrecipitationNowcast? = null,
+    telemetry: BentoTelemetry? = null,
+    alert: SevereAlertInfo? = null,
     onLocationClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
@@ -193,7 +198,16 @@ fun HeroWeatherSection(
                     color = SkyTextMuted
                 )
                 if (hero.lastUpdatedEpochMs > 0L) {
-                    val minutesAgo = ((System.currentTimeMillis() - hero.lastUpdatedEpochMs) / 60000L).coerceAtLeast(0)
+                    var currentTimeMs by remember(hero.lastUpdatedEpochMs) {
+                        mutableLongStateOf(System.currentTimeMillis())
+                    }
+                    LaunchedEffect(hero.lastUpdatedEpochMs) {
+                        while (true) {
+                            delay(60_000L)
+                            currentTimeMs = System.currentTimeMillis()
+                        }
+                    }
+                    val minutesAgo = ((currentTimeMs - hero.lastUpdatedEpochMs) / 60000L).coerceAtLeast(0)
                     val updateLabel = when {
                         minutesAgo < 1 -> "Just now"
                         minutesAgo < 60 -> "${minutesAgo}m ago"
@@ -213,8 +227,8 @@ fun HeroWeatherSection(
             }
 
             // 6. Editorial Pull-Quote "Weather Story" Luminous Glass Card
-            val storyKey = remember(hero.locationName, hero.tempDegrees, hero.conditionText, hero.isDaytime) {
-                "${hero.locationName}_${hero.tempDegrees}_${hero.conditionText}_${hero.isDaytime}"
+            val storyKey = remember(hero.locationName, hero.tempDegrees, hero.conditionText, hero.isDaytime, alert?.title, nowcast?.summaryText) {
+                "${hero.locationName}_${hero.tempDegrees}_${hero.conditionText}_${hero.isDaytime}_${alert?.title.orEmpty()}_${nowcast?.summaryText.orEmpty()}"
             }
             var weatherStory by remember(storyKey) {
                 mutableStateOf<String?>(hero.weatherStory)
@@ -224,7 +238,12 @@ fun HeroWeatherSection(
                 if (hero.weatherStory != null) {
                     weatherStory = hero.weatherStory
                 } else {
-                    weatherStory = sharedAiService.generateStory(hero)
+                    weatherStory = sharedAiService.generateStory(
+                        hero = hero,
+                        telemetry = telemetry,
+                        alert = alert,
+                        nowcast = nowcast
+                    )
                 }
             }
 
@@ -317,7 +336,11 @@ private fun UnifiedPrecipitationNowcastCard(
     }
     val peakHour = upcomingHours.getOrNull(peakIndex)
 
-    val badgeLabel = if (nowcast != null) "15-MIN NOWCAST" else "UPCOMING RAIN"
+    val badgeLabel = when {
+        nowcast != null && nowcast.headlineLabel.isNotBlank() -> nowcast.headlineLabel
+        nowcast != null && nowcast.isHighRes15Min -> "15-MIN RAIN NOWCAST"
+        else -> "SHORT-TERM RAIN FORECAST"
+    }
     val summaryLabel = when {
         nowcast != null && nowcast.summaryText.isNotBlank() -> nowcast.summaryText
         upcomingHours.firstOrNull()?.let { it.rainProbability >= 45 || it.precipitationMm > 0.2 } == true ->

@@ -392,8 +392,13 @@ private fun DayDetailHeroCard(
                                 .clip(CircleShape)
                                 .background(confDotColor)
                         )
+                        val agreementText = if (day.modelSpreadDegrees > 0.0) {
+                            "${day.confidencePercent}% consensus · ±${day.modelSpreadDegrees}° spread"
+                        } else {
+                            "${day.confidencePercent}% single-source forecast"
+                        }
                         Text(
-                            text = "${day.confidencePercent}% ensemble agreement · ±${day.modelSpreadDegrees}° spread",
+                            text = agreementText,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -445,8 +450,9 @@ private fun DayNightComparisonSection(day: DailyItem) {
         else -> "Calm breeze"
     }
     val nightWindLabel = when {
+        day.nightWind.isNotBlank() -> day.nightWind
+        day.nightWindSpeedKmH > 0 -> "Night: ${day.nightWindSpeedKmH} km/h ${day.nightWindDirection}"
         day.afternoonWind.isNotBlank() -> day.afternoonWind
-        day.nightWindSpeedKmH > 0 -> "Wind ${day.nightWindSpeedKmH} km/h ${day.nightWindDirection}"
         else -> "Light night air"
     }
 
@@ -474,7 +480,7 @@ private fun DayNightComparisonSection(day: DailyItem) {
                 condition = day.dayConditionText,
                 effectType = resolveActiveEffectForDay(day),
                 isPartlyCloudy = isPartlyCloudyCondition(day.dayConditionText),
-                rainProb = day.rainProbability,
+                rainProb = day.dayRainProbability,
                 windText = dayWindLabel,
                 modifier = Modifier.weight(1f)
             )
@@ -488,7 +494,7 @@ private fun DayNightComparisonSection(day: DailyItem) {
                 condition = day.nightConditionText,
                 effectType = resolveActiveEffectForNight(day),
                 isPartlyCloudy = isPartlyCloudyCondition(day.nightConditionText),
-                rainProb = day.rainProbability,
+                rainProb = day.nightRainProbability,
                 windText = nightWindLabel,
                 modifier = Modifier.weight(1f)
             )
