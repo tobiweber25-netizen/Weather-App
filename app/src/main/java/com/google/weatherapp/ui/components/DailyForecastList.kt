@@ -2,9 +2,7 @@ package com.google.weatherapp.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -31,12 +29,9 @@ import com.google.weatherapp.theme.*
 fun DailyForecastList(
     dailyList: List<DailyItem>,
     modifier: Modifier = Modifier,
+    currentTemp: Int? = null,
     onDayClick: (DailyItem) -> Unit = {}
 ) {
-    val isDark = isSystemInDarkTheme()
-    val cardBg = if (isDark) GlassCardBackgroundDark else GlassCardBackgroundLight
-    val cardBorder = if (isDark) GlassCardBorderDark else GlassCardBorderLight
-
     val globalMin = dailyList.minOfOrNull { it.minTemp } ?: 10
     val globalMax = dailyList.maxOfOrNull { it.maxTemp } ?: 30
 
@@ -44,35 +39,41 @@ fun DailyForecastList(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = SpacingTokens.Base)
-            .clip(RoundedCornerShape(CornerTokens.Large))
-            .background(cardBg)
-            .border(
-                width = BorderTokens.Hairline,
-                color = cardBorder,
-                shape = RoundedCornerShape(CornerTokens.Large)
-            )
+            .luminousGlass(cornerRadius = CornerTokens.Large)
             .padding(vertical = SpacingTokens.Medium)
     ) {
         // Section Header
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
-            modifier = Modifier.padding(
-                start = SpacingTokens.Base,
-                end = SpacingTokens.Base,
-                bottom = SpacingTokens.Small
-            )
+            horizontalArrangement = Arrangement.SpaceBetween,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(
+                    start = SpacingTokens.Base,
+                    end = SpacingTokens.Base,
+                    bottom = SpacingTokens.Small
+                )
         ) {
-            Icon(
-                imageVector = Icons.Default.CalendarMonth,
-                contentDescription = null,
-                tint = SkyTextSecondary,
-                modifier = Modifier.size(IconSizeTokens.Micro)
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CalendarMonth,
+                    contentDescription = null,
+                    tint = SkyTextSecondary,
+                    modifier = Modifier.size(IconSizeTokens.Micro)
+                )
+                Text(
+                    text = "10-DAY OUTLOOK",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = SkyTextSecondary
+                )
+            }
             Text(
-                text = "10-DAY OUTLOOK",
-                style = MaterialTheme.typography.labelLarge,
-                color = SkyTextSecondary
+                text = "Tap a day for wind & hours",
+                style = MaterialTheme.typography.labelSmall,
+                color = SkyTextMuted
             )
         }
 
@@ -83,10 +84,13 @@ fun DailyForecastList(
         )
 
         dailyList.forEachIndexed { index, item ->
+            val isToday = index == 0 || item.dayLabel.equals("Today", ignoreCase = true)
             DailyForecastItemCard(
                 item = item,
                 globalMin = globalMin,
                 globalMax = globalMax,
+                isToday = isToday,
+                currentTemp = if (isToday) currentTemp else null,
                 showDivider = index < dailyList.lastIndex,
                 onClick = { onDayClick(item) }
             )
@@ -99,131 +103,121 @@ private fun DailyForecastItemCard(
     item: DailyItem,
     globalMin: Int,
     globalMax: Int,
+    isToday: Boolean,
+    currentTemp: Int?,
     showDivider: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isToday = item.dayLabel.equals("Today", ignoreCase = true)
-
     Column(
         modifier = modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
     ) {
-        Column(
-            modifier = Modifier
+        val rowModifier = if (isToday) {
+            Modifier
                 .fillMaxWidth()
-                .padding(vertical = SpacingTokens.Medium, horizontal = SpacingTokens.Base),
-            verticalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
+                .padding(horizontal = SpacingTokens.Small, vertical = SpacingTokens.ExtraSmall)
+                .clip(RoundedCornerShape(CornerTokens.Medium))
+                .background(GlassInnerTopSheen)
+                .padding(vertical = SpacingTokens.Medium, horizontal = SpacingTokens.Small)
+        } else {
+            Modifier
+                .fillMaxWidth()
+                .padding(vertical = SpacingTokens.Medium, horizontal = SpacingTokens.Base)
+        }
+
+        Row(
+            modifier = rowModifier,
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Top Row: Day Name, Dimensional Icon + Rain %, Thermal Bar
+            // Day + Date
+            Column(modifier = Modifier.width(ComponentTokens.DailyItemDayLabelWidth)) {
+                Text(
+                    text = item.dayLabel,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
+                    color = SkyTextPrimary,
+                    maxLines = 1
+                )
+                Text(
+                    text = item.dateText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = SkyTextMuted,
+                    maxLines = 1
+                )
+            }
+
+            // Luminous Glass Icon & Optional Rain Probability
             Row(
-                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
+                modifier = Modifier.width(ComponentTokens.DailyRainColumnWidth)
             ) {
-                // Day + Date
-                Column(modifier = Modifier.width(ComponentTokens.DailyItemDayLabelWidth)) {
+                NothingWeatherIcon(
+                    effectType = com.google.weatherapp.ui.resolveActiveEffectForDay(item),
+                    isPartlyCloudy = isPartlyCloudyCondition(item.conditionText.ifBlank { item.dayConditionText }),
+                    isDaytime = true,
+                    animate = false,
+                    modifier = Modifier.size(IconSizeTokens.Medium)
+                )
+
+                if (item.rainProbability >= 15) {
                     Text(
-                        text = item.dayLabel,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = if (isToday) FontWeight.Bold else FontWeight.SemiBold,
-                        color = SkyTextPrimary,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = item.dateText,
+                        text = "${item.rainProbability}%",
                         style = MaterialTheme.typography.labelSmall,
-                        color = SkyTextMuted,
-                        maxLines = 1
-                    )
-                }
-
-                // Weather Icon & Rain Badge
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
-                    modifier = Modifier.width(ComponentTokens.DailyRainColumnWidth)
-                ) {
-                    NothingWeatherIcon(
-                        effectType = com.google.weatherapp.ui.resolveActiveEffectForDay(item),
-                        modifier = Modifier.size(IconSizeTokens.Medium)
-                    )
-
-                    if (item.rainProbability > 0) {
-                        Text(
-                            text = "${item.rainProbability}%",
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = RainDropCyan
-                        )
-                    }
-                }
-
-                // Horizontal Min/Max Temperature Bar Section
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
-                ) {
-                    Text(
-                        text = "${item.minTemp}°",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium,
-                        color = SkyTextSecondary,
-                        textAlign = TextAlign.End,
-                        modifier = Modifier.width(ComponentTokens.DailyTempLabelWidth),
-                        maxLines = 1,
-                        softWrap = false
-                    )
-
-                    HorizontalTempRangeBar(
-                        minTemp = item.minTemp,
-                        maxTemp = item.maxTemp,
-                        globalMin = globalMin,
-                        globalMax = globalMax,
-                        modifier = Modifier.size(
-                            width = ComponentTokens.TempBarWidth,
-                            height = ComponentTokens.TempBarHeight
-                        )
-                    )
-
-                    Text(
-                        text = "${item.maxTemp}°",
-                        style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Bold,
-                        color = SkyTextPrimary,
-                        textAlign = TextAlign.End,
-                        modifier = Modifier.width(ComponentTokens.DailyTempLabelWidth),
-                        maxLines = 1,
-                        softWrap = false
-                    )
-
-                    Icon(
-                        imageVector = Icons.Default.ChevronRight,
-                        contentDescription = "View details for ${item.dayLabel}",
-                        tint = SkyTextMuted,
-                        modifier = Modifier.size(IconSizeTokens.Small)
+                        color = RainDropCyan
                     )
                 }
             }
 
-            // Bottom Row: Subtle Frosted Morning & Afternoon Wind Capsules
-            if (item.morningWind.isNotBlank() || item.afternoonWind.isNotBlank()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
-                ) {
-                    WindPill(
-                        windText = item.morningWind,
-                        isMorning = true,
-                        modifier = Modifier.weight(1f)
+            // Horizontal Min/Max Temperature Thermal Spectrum Bar
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
+            ) {
+                Text(
+                    text = "${item.minTemp}°",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium,
+                    color = SkyTextSecondary,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.width(ComponentTokens.DailyTempLabelWidth),
+                    maxLines = 1,
+                    softWrap = false
+                )
+
+                HorizontalTempRangeBar(
+                    minTemp = item.minTemp,
+                    maxTemp = item.maxTemp,
+                    globalMin = globalMin,
+                    globalMax = globalMax,
+                    currentTemp = currentTemp,
+                    modifier = Modifier.size(
+                        width = ComponentTokens.TempBarWidth,
+                        height = ComponentTokens.TempBarHeight
                     )
-                    WindPill(
-                        windText = item.afternoonWind,
-                        isMorning = false,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
+                )
+
+                Text(
+                    text = "${item.maxTemp}°",
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = SkyTextPrimary,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier.width(ComponentTokens.DailyTempLabelWidth),
+                    maxLines = 1,
+                    softWrap = false
+                )
+
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = "View details for ${item.dayLabel}",
+                    tint = SkyTextMuted,
+                    modifier = Modifier.size(IconSizeTokens.Small)
+                )
             }
         }
 
@@ -243,6 +237,7 @@ private fun HorizontalTempRangeBar(
     maxTemp: Int,
     globalMin: Int,
     globalMax: Int,
+    currentTemp: Int? = null,
     modifier: Modifier = Modifier
 ) {
     Canvas(modifier = modifier) {
@@ -276,29 +271,23 @@ private fun HorizontalTempRangeBar(
             size = Size(endX - startX, size.height),
             cornerRadius = CornerRadius(size.height / 2, size.height / 2)
         )
-    }
-}
 
-@Composable
-private fun WindPill(
-    windText: String,
-    isMorning: Boolean,
-    modifier: Modifier = Modifier
-) {
-    val bgColor = if (isMorning) WindTagDayBackground else WindTagNightBackground
+        // Signature glowing current-temperature indicator dot on Today's bar
+        if (currentTemp != null) {
+            val currRatio = ((currentTemp - globalMin) / totalRange).coerceIn(startRatio, endRatio)
+            val dotX = (size.width * currRatio).coerceIn(size.height * 0.6f, size.width - size.height * 0.6f)
+            val cy = size.height * 0.5f
 
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(CornerTokens.Small))
-            .background(bgColor)
-            .padding(horizontal = SpacingTokens.Small, vertical = SpacingTokens.ExtraSmall),
-        contentAlignment = Alignment.CenterStart
-    ) {
-        Text(
-            text = windText,
-            style = MaterialTheme.typography.labelSmall,
-            color = SkyTextSecondary,
-            maxLines = 1
-        )
+            drawCircle(
+                color = Black.copy(alpha = 0.55f),
+                radius = size.height * 0.92f,
+                center = Offset(dotX, cy)
+            )
+            drawCircle(
+                color = PureWhite,
+                radius = size.height * 0.64f,
+                center = Offset(dotX, cy)
+            )
+        }
     }
 }

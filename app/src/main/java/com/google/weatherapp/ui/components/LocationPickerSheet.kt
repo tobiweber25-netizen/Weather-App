@@ -7,8 +7,10 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.LocationCity
@@ -57,7 +59,7 @@ fun LocationPickerSheet(
                 .padding(horizontal = SpacingTokens.Base),
             verticalArrangement = Arrangement.spacedBy(SpacingTokens.Medium)
         ) {
-            // Header
+            // Editorial Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -66,14 +68,22 @@ fun LocationPickerSheet(
                 Text(
                     text = "Locations",
                     style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface
                 )
-                IconButton(onClick = onDismiss) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(ComponentTokens.TopBarActionButtonSize)
+                        .clip(CircleShape)
+                        .background(cardBg)
+                        .border(BorderTokens.Hairline, cardBorder, CircleShape)
+                        .clickable(onClick = onDismiss)
+                ) {
                     Icon(
                         imageVector = Icons.Default.Close,
                         contentDescription = "Close location switcher",
-                        tint = MaterialTheme.colorScheme.onSurface
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(IconSizeTokens.Small)
                     )
                 }
             }
@@ -115,7 +125,7 @@ fun LocationPickerSheet(
                     }
                 },
                 singleLine = true,
-                shape = RoundedCornerShape(CornerTokens.Medium),
+                shape = RoundedCornerShape(CornerTokens.Pill),
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -207,12 +217,12 @@ private fun LocationRowCard(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(CornerTokens.Medium))
+            .clip(RoundedCornerShape(CornerTokens.Large))
             .background(cardBg)
             .border(
                 width = if (isSelected) BorderTokens.Subtle else BorderTokens.Hairline,
                 color = activeBorder,
-                shape = RoundedCornerShape(CornerTokens.Medium)
+                shape = RoundedCornerShape(CornerTokens.Large)
             )
             .clickable(onClick = onClick)
             .padding(horizontal = SpacingTokens.Base, vertical = SpacingTokens.Medium),
@@ -221,15 +231,26 @@ private fun LocationRowCard(
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
+            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Medium),
             modifier = Modifier.weight(1f)
         ) {
-            Icon(
-                imageVector = if (isGps) Icons.Default.MyLocation else Icons.Default.LocationCity,
-                contentDescription = null,
-                tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(IconSizeTokens.Small)
-            )
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(IconSizeTokens.Large)
+                    .clip(CircleShape)
+                    .background(
+                        if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    )
+            ) {
+                Icon(
+                    imageVector = if (isGps) Icons.Default.MyLocation else Icons.Default.LocationCity,
+                    contentDescription = null,
+                    tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(IconSizeTokens.Small)
+                )
+            }
             Column {
                 Text(
                     text = title,
@@ -247,14 +268,32 @@ private fun LocationRowCard(
             }
         }
 
-        if (onDelete != null) {
-            IconButton(onClick = onDelete) {
-                Icon(
-                    imageVector = Icons.Default.DeleteOutline,
-                    contentDescription = "Remove $title",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(IconSizeTokens.Small)
-                )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (isSelected) {
+                Box(
+                    contentAlignment = Alignment.Center,
+                    modifier = Modifier
+                        .size(IconSizeTokens.Medium)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Selected",
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(IconSizeTokens.Micro)
+                    )
+                }
+            }
+            if (onDelete != null) {
+                IconButton(onClick = onDelete) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Remove $title",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(IconSizeTokens.Small)
+                    )
+                }
             }
         }
     }

@@ -28,7 +28,7 @@ object CornerTokens {
     val Small: Dp = 12.dp
     val Medium: Dp = 18.dp
     val Large: Dp = 24.dp
-    val ExtraLarge: Dp = 32.dp
+    val ExtraLarge: Dp = 30.dp
     val Pill: Dp = 999.dp
 }
 
@@ -37,10 +37,10 @@ object IconSizeTokens {
     val Micro: Dp = 14.dp
     val Small: Dp = 18.dp
     val Medium: Dp = 26.dp
-    val Large: Dp = 34.dp
+    val Large: Dp = 36.dp
     val ExtraLarge: Dp = 48.dp
     val Hero: Dp = 76.dp
-    val HeroDisplay: Dp = 108.dp
+    val HeroDisplay: Dp = 112.dp
 }
 
 object ElevationTokens {
@@ -54,29 +54,37 @@ object BorderTokens {
     val Hairline: Dp = 1.dp
     val Subtle: Dp = 1.5.dp
     val Thick: Dp = 2.dp
+    val AccentRule: Dp = 3.dp
 }
 
 object ComponentTokens {
-    val HourlyCardWidth: Dp = 68.dp
-    val HourlyCardHeight: Dp = 148.dp
-    val HourlyCurveCanvasHeight: Dp = 28.dp
-    val PrecipNowcastBarHeight: Dp = 44.dp
+    val TopBarActionButtonSize: Dp = 38.dp
+    val HourlyCardWidth: Dp = 66.dp
+    val HourlyCardHeight: Dp = 154.dp
+    val HourlyCurveCanvasHeight: Dp = 36.dp
+    val PrecipNowcastBarHeight: Dp = 52.dp
     val TempBarHeight: Dp = 6.dp
-    val TempBarWidth: Dp = 84.dp
-    val DailyItemDayLabelWidth: Dp = 80.dp
-    val DailyRainColumnWidth: Dp = 68.dp
+    val TempBarWidth: Dp = 88.dp
+    val DailyItemDayLabelWidth: Dp = 84.dp
+    val DailyRainColumnWidth: Dp = 66.dp
     val DailyTempLabelWidth: Dp = 36.dp
-    val BentoCardMinHeight: Dp = 152.dp
-    val BentoGaugeHeight: Dp = 36.dp
+    val BentoCardMinHeight: Dp = 164.dp
+    val BentoSolarCardHeight: Dp = 152.dp
+    val BentoSolarArcHeight: Dp = 64.dp
+    val BentoGaugeHeight: Dp = 46.dp
+    val BentoCompassHeight: Dp = 52.dp
+    val BentoBarometerHeight: Dp = 52.dp
     val BentoGaugeStroke: Dp = 5.dp
-    val BentoSparklineHeight: Dp = 84.dp
-    val AlertSparklineHeight: Dp = 64.dp
+    val BentoSparklineHeight: Dp = 104.dp
+    val AlertSparklineHeight: Dp = 72.dp
     val HeroCardMinHeight: Dp = 220.dp
     val SkeletonPillHeight: Dp = 44.dp
-    val SkeletonTextHeight: Dp = 16.dp
+    val SkeletonTextHeight: Dp = 14.dp
     val SkeletonTitleHeight: Dp = 28.dp
-    val SkeletonIconSize: Dp = 56.dp
-    val LocationSearchMaxHeight: Dp = 420.dp
+    val SkeletonHeroTempHeight: Dp = 84.dp
+    val SkeletonIconSize: Dp = 76.dp
+    val LocationSearchMaxHeight: Dp = 460.dp
+    val DayDetailMicroBarHeight: Dp = 5.dp
 }
 
 object EffectTokens {
@@ -128,10 +136,12 @@ object EffectTokens {
 }
 
 object DayDetailTokens {
-    val DayChipWidth: Dp = 82.dp
-    val DayChipHeight: Dp = 82.dp
-    val BreakdownCardMinHeight: Dp = 148.dp
+    val DayChipWidth: Dp = 80.dp
+    val DayChipHeight: Dp = 84.dp
+    val BreakdownCardMinHeight: Dp = 152.dp
     val DetailHeroMinHeight: Dp = 130.dp
     val SheetHandleWidth: Dp = 36.dp
     val SheetHandleHeight: Dp = 4.dp
+    val DetailHourlyCardWidth: Dp = 60.dp
+    val DetailHourlyCurveHeight: Dp = 28.dp
 }

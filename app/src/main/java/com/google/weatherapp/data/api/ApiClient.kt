@@ -16,7 +16,7 @@ object ApiClient {
         level = HttpLoggingInterceptor.Level.BASIC
     }
 
-    private val okHttpClient = OkHttpClient.Builder().apply {
+    internal val okHttpClient = OkHttpClient.Builder().apply {
         if (com.google.weatherapp.BuildConfig.DEBUG) {
             addInterceptor(loggingInterceptor)
         }

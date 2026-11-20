@@ -1,11 +1,11 @@
 package com.google.weatherapp.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.ExpandLess
@@ -34,11 +34,12 @@ fun SevereWeatherAlertPill(
     var expanded by remember { mutableStateOf(false) }
 
     val isSevere = alert.riskLevel == SeverityRiskLevel.SEVERE || alert.riskLevel == SeverityRiskLevel.HIGH
-    val containerColor = when {
+    val containerTopColor = when {
         isSevere -> AlertSevereContainer
         alert.riskLevel == SeverityRiskLevel.MODERATE -> AlertWarningContainer
         else -> AlertLowContainer
     }
+    val containerBottomColor = containerTopColor.copy(alpha = (containerTopColor.alpha * 1.25f).coerceAtMost(0.88f))
     val contentColor = when {
         isSevere -> AlertSevereOnContainer
         alert.riskLevel == SeverityRiskLevel.MODERATE -> AlertWarningOnContainer
@@ -47,7 +48,7 @@ fun SevereWeatherAlertPill(
     val borderColor = when {
         isSevere -> AlertSevereBorder
         alert.riskLevel == SeverityRiskLevel.MODERATE -> AlertWarningBorder
-        else -> GlassCardBorderLight
+        else -> GlassRimSpecularTop
     }
 
     val icon = when (alert.riskLevel) {
@@ -57,20 +58,30 @@ fun SevereWeatherAlertPill(
         SeverityRiskLevel.LOW -> Icons.Default.Shield
     }
 
+    val pulseTransition = rememberInfiniteTransition(label = "alert_beacon_pulse")
+    val beaconAlpha by pulseTransition.animateFloat(
+        initialValue = 0.45f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "beacon_alpha"
+    )
+
     val peakSuffix = alert.peakHourLabel?.let {
-        if (it == "Now") " • Active Now" else " • Peak at $it"
+        if (it == "Now") " · Active Now" else " · Peak at $it"
     } ?: ""
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = SpacingTokens.Base)
-            .clip(RoundedCornerShape(CornerTokens.Large))
-            .background(containerColor)
-            .border(
-                width = BorderTokens.Hairline,
-                color = borderColor,
-                shape = RoundedCornerShape(CornerTokens.Large)
+            .luminousGlass(
+                cornerRadius = CornerTokens.Large,
+                accentBorderColor = borderColor,
+                overrideTopColor = containerTopColor,
+                overrideBottomColor = containerBottomColor
             )
             .clickable { expanded = !expanded }
             .padding(horizontal = SpacingTokens.Base, vertical = SpacingTokens.Medium)
@@ -85,12 +96,20 @@ fun SevereWeatherAlertPill(
                 horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
                 modifier = Modifier.weight(1f)
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = "Weather Alert Indicator",
-                    tint = SunCoreGold,
-                    modifier = Modifier.size(IconSizeTokens.Medium)
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    Box(
+                        modifier = Modifier
+                            .size(IconSizeTokens.Large)
+                            .clip(CircleShape)
+                            .background(SunCoreGold.copy(alpha = 0.18f * beaconAlpha))
+                    )
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = "Weather Alert Indicator",
+                        tint = SunCoreGold,
+                        modifier = Modifier.size(IconSizeTokens.Small)
+                    )
+                }
 
                 Column {
                     Text(
@@ -103,7 +122,7 @@ fun SevereWeatherAlertPill(
                     Text(
                         text = "24h Storm Probability: ${alert.thunderstormProbability}%$peakSuffix",
                         style = MaterialTheme.typography.labelSmall,
-                        color = contentColor.copy(alpha = 0.85f),
+                        color = contentColor.copy(alpha = 0.88f),
                         maxLines = 1
                     )
                 }
@@ -121,7 +140,7 @@ fun SevereWeatherAlertPill(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = SpacingTokens.Small),
+                    .padding(top = SpacingTokens.Medium),
                 verticalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
             ) {
                 Text(
@@ -132,14 +151,15 @@ fun SevereWeatherAlertPill(
 
                 if (alert.hourlyStormProbabilities.any { it > 0 }) {
                     Text(
-                        text = "24-HOUR STORM PROBABILITY CURVE",
+                        text = "24-HOUR STORM PROBABILITY",
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
-                        color = contentColor.copy(alpha = 0.8f)
+                        color = contentColor.copy(alpha = 0.85f)
                     )
                     DotMatrixGraph(
                         data = alert.hourlyStormProbabilities.map { it.toFloat() },
                         color = SunCoreGold,
+                        unitSuffix = "%",
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(ComponentTokens.AlertSparklineHeight)

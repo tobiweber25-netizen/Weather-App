@@ -4,8 +4,12 @@ import android.Manifest
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -15,21 +19,27 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationCity
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -93,7 +103,7 @@ fun WeatherScreen(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-                      permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         if (granted) {
             viewModel.onLocationPermissionGranted()
         }
@@ -153,6 +163,16 @@ fun WeatherScreen(
         else -> defaultEffect != WeatherEffectType.CLEAR_NIGHT
     }
 
+    val sunProgress = (uiState as? WeatherUiState.Success)?.data?.telemetry?.sunProgress ?: 0.5f
+    val isGoldenHour = isDaytime && (sunProgress < 0.20f || sunProgress > 0.80f) &&
+        (resolvedEffect == WeatherEffectType.CLEAR_DAY || resolvedEffect == WeatherEffectType.CLOUDY)
+
+    val isBrightSky = isDaytime && (
+        resolvedEffect == WeatherEffectType.CLEAR_DAY ||
+            resolvedEffect == WeatherEffectType.CLOUDY ||
+            resolvedEffect == WeatherEffectType.SNOW
+        )
+
     val targetSkyPalette = remember(resolvedEffect, isDaytime) {
         resolveSkyGradientStopColors(resolvedEffect, isDaytime)
     }
@@ -173,439 +193,615 @@ fun WeatherScreen(
         label = "sky_bottom"
     )
 
-    Box(
-        modifier = modifier
-            .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(skyTop, skyMid, skyBottom)
-                )
-            )
-    ) {
-        if (uiState is WeatherUiState.Success) {
-            WeatherEffectOverlay(
-                effectType = resolvedEffect,
-                modifier = Modifier.fillMaxSize()
-            )
+    val listState = rememberLazyListState()
+    val isScrolledPastHero by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 190
         }
+    }
+    val topBarScrimAlpha by animateFloatAsState(
+        targetValue = if (isScrolledPastHero) 1f else 0f,
+        animationSpec = tween(durationMillis = 260),
+        label = "topbar_scrim_alpha"
+    )
 
+    CompositionLocalProvider(LocalSkyIsBright provides isBrightSky) {
         Box(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxSize()
                 .background(
                     brush = Brush.verticalGradient(
-                        colors = listOf(
-                            SkyContrastScrimTop,
-                            SkyContrastScrimMidLight,
-                            SkyContrastScrimBottomLight
+                        colors = listOf(skyTop, skyMid, skyBottom)
+                    )
+                )
+                .drawBehind {
+                    // Subtle zenith atmospheric depth & golden-hour/nocturnal horizon bloom
+                    drawRect(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(SkyZenithDepthWash, Transparent),
+                            startY = 0f,
+                            endY = size.height * 0.32f
                         )
                     )
+                    if (isGoldenHour) {
+                        val glowCenter = Offset(size.width * 0.5f, size.height * 0.82f)
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(
+                                    GoldenHourBloomAmber,
+                                    GoldenHourHorizonPeach,
+                                    Transparent
+                                ),
+                                center = glowCenter,
+                                radius = size.width * 0.95f
+                            ),
+                            radius = size.width * 0.95f,
+                            center = glowCenter
+                        )
+                    } else if (!isDaytime) {
+                        val nightCenter = Offset(size.width * 0.5f, size.height * 0.92f)
+                        drawCircle(
+                            brush = Brush.radialGradient(
+                                colors = listOf(NocturnalHorizonGlow, Transparent),
+                                center = nightCenter,
+                                radius = size.width * 0.85f
+                            ),
+                            radius = size.width * 0.85f,
+                            center = nightCenter
+                        )
+                    }
+                }
+        ) {
+            if (uiState is WeatherUiState.Success) {
+                WeatherEffectOverlay(
+                    effectType = resolvedEffect,
+                    modifier = Modifier.fillMaxSize()
                 )
-        )
+            }
 
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(CornerTokens.Small))
-                                .clickable(
-                                    indication = null,
-                                    interactionSource = remember { MutableInteractionSource() }
-                                ) {
-                                    val now = System.currentTimeMillis()
-                                    if (now - lastEasterEggTapTime > 2000L) {
-                                        easterEggTapCount = 1
-                                    } else {
-                                        easterEggTapCount++
-                                    }
-                                    lastEasterEggTapTime = now
-
-                                    if (easterEggTapCount in 3..4) {
-                                        Toast.makeText(
-                                            context,
-                                            "${5 - easterEggTapCount} taps to test OTA updates",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                    } else if (easterEggTapCount >= 5) {
-                                        easterEggTapCount = 0
-                                        Toast.makeText(
-                                            context,
-                                            "OTA Update Test Mode Activated!",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                        showUpdateDialog = true
-                                        updateCheckState = UpdateCheckState.Checking
-                                        updateDownloadState = UpdateDownloadState.Idle
-                                        coroutineScope.launch {
-                                            updateCheckState = updateManager.checkForUpdates(forceUpdate = true)
-                                        }
-                                    }
-                                }
-                        ) {
-                            Text(
-                                text = "Almanac",
-                                fontFamily = EditorialSerifFont,
-                                fontStyle = FontStyle.Italic,
-                                style = MaterialTheme.typography.titleLarge,
-                                fontWeight = FontWeight.Normal,
-                                color = SkyTextPrimary
-                            )
-                            if (activeEffectOverride != null) {
-                                Surface(
-                                    color = GlassCardBackgroundDark,
-                                    shape = RoundedCornerShape(CornerTokens.Pill),
-                                    border = BorderStroke(BorderTokens.Hairline, GlassCardBorderLight)
-                                ) {
-                                    Text(
-                                        text = "Preview",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = SkyTextSecondary,
-                                        modifier = Modifier.padding(horizontal = SpacingTokens.Small, vertical = SpacingTokens.ExtraSmall)
-                                    )
-                                }
-                            }
-                        }
-                    },
-                    actions = {
-                        Box {
-                            IconButton(onClick = { showMenu = true }) {
-                                Icon(
-                                    imageVector = Icons.Default.MoreVert,
-                                    contentDescription = "Options menu",
-                                    tint = SkyTextPrimary
-                                )
-                            }
-                            DropdownMenu(
-                                expanded = showMenu,
-                                onDismissRequest = { showMenu = false },
-                                shape = RoundedCornerShape(CornerTokens.Large),
-                                containerColor = MaterialTheme.colorScheme.surface,
-                                tonalElevation = ElevationTokens.Flat,
-                                shadowElevation = ElevationTokens.Level2,
-                                border = BorderStroke(BorderTokens.Hairline, MaterialTheme.colorScheme.outline)
-                            ) {
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = "Locations",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Medium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Default.LocationCity,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    },
-                                    onClick = {
-                                        showMenu = false
-                                        showLocationPicker = true
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = "Notifications & Briefings",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Medium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Default.Notifications,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    },
-                                    onClick = {
-                                        showMenu = false
-                                        showNotificationSheet = true
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = "Check for Updates",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.Medium,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    },
-                                    leadingIcon = {
-                                        Icon(
-                                            imageVector = Icons.Default.SystemUpdate,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                    },
-                                    onClick = {
-                                        showMenu = false
-                                        showUpdateDialog = true
-                                        updateCheckState = UpdateCheckState.Checking
-                                        updateDownloadState = UpdateDownloadState.Idle
-                                        coroutineScope.launch {
-                                            updateCheckState = updateManager.checkForUpdates()
-                                        }
-                                    }
-                                )
-                            }
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent
-                    )
-                )
-            },
-            containerColor = Color.Transparent,
-            modifier = Modifier.fillMaxSize()
-        ) { paddingValues ->
-            PullToRefreshBox(
-                isRefreshing = isRefreshing,
-                onRefresh = { viewModel.refresh() },
+            // Adaptive atmospheric contrast scrim ensures crisp readability on both bright day & night skies
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(paddingValues)
-            ) {
-                when (val state = uiState) {
-                    is WeatherUiState.Loading -> {
-                        WeatherSkeletonPlaceholder()
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                SkyContrastScrimTop,
+                                if (isBrightSky) SkyContrastScrimMidDark else SkyContrastScrimMidLight,
+                                if (isBrightSky) SkyContrastScrimBottomDark else SkyContrastScrimBottomLight
+                            )
+                        )
+                    )
+            )
+
+            Scaffold(
+                topBar = {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(GlassHeaderScrim.copy(alpha = 0.82f * topBarScrimAlpha))
+                            .drawBehind {
+                                if (topBarScrimAlpha > 0.05f) {
+                                    drawLine(
+                                        color = GlassCardBorderLight.copy(alpha = 0.45f * topBarScrimAlpha),
+                                        start = Offset(0f, size.height),
+                                        end = Offset(size.width, size.height),
+                                        strokeWidth = 1f
+                                    )
+                                }
+                            }
+                    ) {
+                        TopAppBar(
+                            title = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(CornerTokens.Small))
+                                        .clickable(
+                                            indication = null,
+                                            interactionSource = remember { MutableInteractionSource() }
+                                        ) {
+                                            val now = System.currentTimeMillis()
+                                            if (now - lastEasterEggTapTime > 2000L) {
+                                                easterEggTapCount = 1
+                                            } else {
+                                                easterEggTapCount++
+                                            }
+                                            lastEasterEggTapTime = now
+
+                                            if (easterEggTapCount in 3..4) {
+                                                Toast.makeText(
+                                                    context,
+                                                    "${5 - easterEggTapCount} taps to test OTA updates",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            } else if (easterEggTapCount >= 5) {
+                                                easterEggTapCount = 0
+                                                Toast.makeText(
+                                                    context,
+                                                    "OTA Update Test Mode Activated!",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                                showUpdateDialog = true
+                                                updateCheckState = UpdateCheckState.Checking
+                                                updateDownloadState = UpdateDownloadState.Idle
+                                                coroutineScope.launch {
+                                                    updateCheckState = updateManager.checkForUpdates(forceUpdate = true)
+                                                }
+                                            }
+                                        }
+                                ) {
+                                    Text(
+                                        text = "Almanac",
+                                        style = AlmanacWordmarkTextStyle,
+                                        color = SkyTextPrimary
+                                    )
+
+                                    val successHero = (uiState as? WeatherUiState.Success)?.data?.hero
+                                    AnimatedVisibility(
+                                        visible = isScrolledPastHero && successHero != null,
+                                        enter = fadeIn(tween(220)),
+                                        exit = fadeOut(tween(180))
+                                    ) {
+                                        if (successHero != null) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(CornerTokens.Pill))
+                                                    .background(GlassPillHighlight)
+                                                    .border(
+                                                        BorderTokens.Hairline,
+                                                        GlassRimSpecularTop,
+                                                        RoundedCornerShape(CornerTokens.Pill)
+                                                    )
+                                                    .padding(
+                                                        horizontal = SpacingTokens.Small,
+                                                        vertical = SpacingTokens.Micro
+                                                    )
+                                            ) {
+                                                Text(
+                                                    text = "${successHero.locationName} · ${successHero.tempDegrees}°",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = SkyTextPrimary,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    if (activeEffectOverride != null) {
+                                        Surface(
+                                            color = GlassCardBackgroundDark,
+                                            shape = RoundedCornerShape(CornerTokens.Pill),
+                                            border = BorderStroke(BorderTokens.Hairline, GlassCardBorderLight)
+                                        ) {
+                                            Text(
+                                                text = "Preview",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = SkyTextSecondary,
+                                                modifier = Modifier.padding(
+                                                    horizontal = SpacingTokens.Small,
+                                                    vertical = SpacingTokens.ExtraSmall
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            actions = {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
+                                    modifier = Modifier.padding(end = SpacingTokens.Small)
+                                ) {
+                                    // Quick Frosted Location Switcher Button
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier
+                                            .size(ComponentTokens.TopBarActionButtonSize)
+                                            .luminousGlass(cornerRadius = CornerTokens.Pill)
+                                            .clickable { showLocationPicker = true }
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.LocationOn,
+                                            contentDescription = "Switch City",
+                                            tint = SkyTextPrimary,
+                                            modifier = Modifier.size(IconSizeTokens.Small)
+                                        )
+                                    }
+
+                                    // Frosted Options Menu Button
+                                    Box {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier
+                                                .size(ComponentTokens.TopBarActionButtonSize)
+                                                .luminousGlass(cornerRadius = CornerTokens.Pill)
+                                                .clickable { showMenu = true }
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.MoreVert,
+                                                contentDescription = "Options menu",
+                                                tint = SkyTextPrimary,
+                                                modifier = Modifier.size(IconSizeTokens.Small)
+                                            )
+                                        }
+
+                                        DropdownMenu(
+                                            expanded = showMenu,
+                                            onDismissRequest = { showMenu = false },
+                                            shape = RoundedCornerShape(CornerTokens.Large),
+                                            containerColor = GlassMenuContainer,
+                                            tonalElevation = ElevationTokens.Flat,
+                                            shadowElevation = ElevationTokens.Level3,
+                                            border = BorderStroke(BorderTokens.Hairline, GlassMenuBorder)
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = "Locations",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = SkyTextPrimary
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        imageVector = Icons.Default.LocationCity,
+                                                        contentDescription = null,
+                                                        tint = SunCoreGold
+                                                    )
+                                                },
+                                                onClick = {
+                                                    showMenu = false
+                                                    showLocationPicker = true
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = "Notifications & Briefings",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = SkyTextPrimary
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Notifications,
+                                                        contentDescription = null,
+                                                        tint = PrimaryDark
+                                                    )
+                                                },
+                                                onClick = {
+                                                    showMenu = false
+                                                    showNotificationSheet = true
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
+                                                        text = "Check for Updates",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = SkyTextPrimary
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        imageVector = Icons.Default.SystemUpdate,
+                                                        contentDescription = null,
+                                                        tint = TempBarMildColor
+                                                    )
+                                                },
+                                                onClick = {
+                                                    showMenu = false
+                                                    showUpdateDialog = true
+                                                    updateCheckState = UpdateCheckState.Checking
+                                                    updateDownloadState = UpdateDownloadState.Idle
+                                                    coroutineScope.launch {
+                                                        updateCheckState = updateManager.checkForUpdates()
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = Color.Transparent
+                            )
+                        )
                     }
-                    is WeatherUiState.Error -> {
-                        Column(
+                },
+                containerColor = Color.Transparent,
+                modifier = Modifier.fillMaxSize()
+            ) { paddingValues ->
+                // Full-bleed edge-to-edge scroll content glides smoothly behind the floating glass header
+                val pullToRefreshState = rememberPullToRefreshState()
+                PullToRefreshBox(
+                    isRefreshing = isRefreshing,
+                    onRefresh = { viewModel.refresh() },
+                    state = pullToRefreshState,
+                    indicator = {
+                        PullToRefreshDefaults.Indicator(
+                            state = pullToRefreshState,
+                            isRefreshing = isRefreshing,
                             modifier = Modifier
-                                .fillMaxSize()
-                                .padding(SpacingTokens.Base),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
+                                .align(Alignment.TopCenter)
+                                .padding(top = paddingValues.calculateTopPadding())
+                        )
+                    },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    when (val state = uiState) {
+                        is WeatherUiState.Loading -> {
+                            WeatherSkeletonPlaceholder(
+                                modifier = Modifier.padding(top = paddingValues.calculateTopPadding())
+                            )
+                        }
+                        is WeatherUiState.Error -> {
                             Column(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(CornerTokens.Large))
-                                    .background(GlassCardBackgroundDark)
-                                    .border(
-                                        width = BorderTokens.Hairline,
-                                        color = GlassCardBorderLight,
-                                        shape = RoundedCornerShape(CornerTokens.Large)
-                                    )
-                                    .padding(SpacingTokens.ExtraLarge),
+                                    .fillMaxSize()
+                                    .padding(paddingValues)
+                                    .padding(SpacingTokens.Base),
+                                verticalArrangement = Arrangement.Center,
                                 horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                Text(
-                                    text = "Unable to load weather",
-                                    style = MaterialTheme.typography.titleLarge,
-                                    color = SkyTextPrimary
-                                )
-                                Spacer(modifier = Modifier.height(SpacingTokens.Small))
-                                Text(
-                                    text = state.message,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = SkyTextSecondary
-                                )
-                                Spacer(modifier = Modifier.height(SpacingTokens.Base))
-                                Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)) {
-                                    Button(onClick = { viewModel.loadWeatherData() }) {
-                                        Text("Retry")
-                                    }
-                                    OutlinedButton(onClick = { showLocationPicker = true }) {
-                                        Text("Pick a City", color = SkyTextPrimary)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    is WeatherUiState.Success -> {
-                        val data = state.data
-                        val listState = rememberLazyListState()
-                        var widgetOrder by remember {
-                            mutableStateOf(
-                                listOf(
-                                    DashboardSection.HERO,
-                                    DashboardSection.ALERT,
-                                    DashboardSection.HOURLY,
-                                    DashboardSection.DAILY,
-                                    DashboardSection.TELEMETRY
-                                )
-                            )
-                        }
-                        val reorderableState = rememberReorderableLazyListState(listState) { from, to ->
-                            val fromIdx = widgetOrder.indexOfFirst { it.name == from.key }
-                            val toIdx = widgetOrder.indexOfFirst { it.name == to.key }
-                            if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
-                                widgetOrder = widgetOrder.toMutableList().apply {
-                                    add(toIdx, removeAt(fromIdx))
-                                }
-                            }
-                        }
-
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxSize(),
-                            verticalArrangement = Arrangement.spacedBy(SpacingTokens.Base)
-                        ) {
-                            items(widgetOrder, key = { it.name }) { widget ->
-                                ReorderableItem(reorderableState, key = widget.name) { isDragging ->
-                                    val baseModifier = Modifier.longPressDraggableHandle()
-                                    val widgetModifier = if (isDragging) {
-                                        baseModifier
-                                            .padding(horizontal = SpacingTokens.ExtraSmall)
-                                            .border(
-                                                width = BorderTokens.Subtle,
-                                                color = GlassCardBorderLight,
-                                                shape = RoundedCornerShape(CornerTokens.Large)
-                                            )
-                                    } else {
-                                        baseModifier
-                                    }
-
-                                    when (widget) {
-                                        DashboardSection.HERO -> HeroWeatherSection(
-                                            hero = data.hero,
-                                            hourlyList = data.hourlyList,
-                                            nowcast = data.nowcast,
-                                            onLocationClick = { showLocationPicker = true },
-                                            modifier = widgetModifier
-                                        )
-                                        DashboardSection.ALERT -> SevereWeatherAlertPill(
-                                            alert = data.alert,
-                                            modifier = widgetModifier
-                                        )
-                                        DashboardSection.HOURLY -> HourlyForecastStrip(
-                                            hourlyItems = data.hourlyList,
-                                            modifier = widgetModifier
-                                        )
-                                        DashboardSection.DAILY -> DailyForecastList(
-                                            dailyList = data.dailyList,
-                                            onDayClick = { selectedDay = it },
-                                            modifier = widgetModifier
-                                        )
-                                        DashboardSection.TELEMETRY -> BentoTelemetryGrid(
-                                            telemetry = data.telemetry,
-                                            hourlyList = data.hourlyList,
-                                            isDaytime = data.hero.isDaytime,
-                                            modifier = widgetModifier
-                                        )
-                                    }
-                                }
-                            }
-                            item {
-                                Box(
+                                Column(
                                     modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(top = SpacingTokens.Base, bottom = SpacingTokens.Huge),
-                                    contentAlignment = Alignment.Center
+                                        .luminousGlass(cornerRadius = CornerTokens.Large, elevated = true)
+                                        .padding(SpacingTokens.ExtraLarge),
+                                    horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(CornerTokens.Pill),
-                                        color = GlassCardBackgroundDark,
-                                        border = BorderStroke(BorderTokens.Hairline, GlassCardBorderLight),
-                                        modifier = Modifier.clickable {
-                                            Toast.makeText(
-                                                context,
-                                                "Almanac v${com.google.weatherapp.BuildConfig.VERSION_NAME} (Code ${com.google.weatherapp.BuildConfig.VERSION_CODE})",
-                                                Toast.LENGTH_LONG
-                                            ).show()
+                                    Text(
+                                        text = "Unable to load weather",
+                                        style = MaterialTheme.typography.headlineMedium,
+                                        color = SkyTextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(SpacingTokens.Small))
+                                    Text(
+                                        text = state.message,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = SkyTextSecondary
+                                    )
+                                    Spacer(modifier = Modifier.height(SpacingTokens.Large))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)) {
+                                        Button(
+                                            onClick = { viewModel.loadWeatherData() },
+                                            shape = RoundedCornerShape(CornerTokens.Pill)
+                                        ) {
+                                            Text("Retry")
                                         }
-                                    ) {
-                                        Text(
-                                            text = "v${com.google.weatherapp.BuildConfig.VERSION_NAME}",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = SkyTextSecondary,
-                                            modifier = Modifier.padding(horizontal = SpacingTokens.Medium, vertical = SpacingTokens.ExtraSmall)
-                                        )
+                                        OutlinedButton(
+                                            onClick = { showLocationPicker = true },
+                                            shape = RoundedCornerShape(CornerTokens.Pill),
+                                            border = BorderStroke(BorderTokens.Hairline, GlassCardBorderLight)
+                                        ) {
+                                            Text("Pick a City", color = SkyTextPrimary)
+                                        }
                                     }
                                 }
                             }
                         }
+                        is WeatherUiState.Success -> {
+                            val data = state.data
+                            var widgetOrder by remember {
+                                mutableStateOf(
+                                    listOf(
+                                        DashboardSection.HERO,
+                                        DashboardSection.ALERT,
+                                        DashboardSection.HOURLY,
+                                        DashboardSection.DAILY,
+                                        DashboardSection.TELEMETRY
+                                    )
+                                )
+                            }
+                            val reorderableState = rememberReorderableLazyListState(listState) { from, to ->
+                                val fromIdx = widgetOrder.indexOfFirst { it.name == from.key }
+                                val toIdx = widgetOrder.indexOfFirst { it.name == to.key }
+                                if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+                                    widgetOrder = widgetOrder.toMutableList().apply {
+                                        add(toIdx, removeAt(fromIdx))
+                                    }
+                                }
+                            }
 
-                        selectedDay?.let { currentDay ->
-                            DayDetailModalSheet(
-                                day = currentDay,
-                                allDays = data.dailyList,
-                                onSelectDay = { selectedDay = it },
-                                onDismiss = { selectedDay = null }
-                            )
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(
+                                    top = paddingValues.calculateTopPadding() + SpacingTokens.ExtraSmall,
+                                    bottom = paddingValues.calculateBottomPadding() + SpacingTokens.Base
+                                ),
+                                verticalArrangement = Arrangement.spacedBy(SpacingTokens.Base)
+                            ) {
+                                items(widgetOrder, key = { it.name }) { widget ->
+                                    ReorderableItem(reorderableState, key = widget.name) { isDragging ->
+                                        val dragScale by animateFloatAsState(
+                                            targetValue = if (isDragging) 1.02f else 1f,
+                                            animationSpec = tween(160),
+                                            label = "drag_scale"
+                                        )
+                                        val baseModifier = Modifier
+                                            .longPressDraggableHandle()
+                                            .graphicsLayer {
+                                                scaleX = dragScale
+                                                scaleY = dragScale
+                                            }
+                                        val widgetModifier = if (isDragging) {
+                                            baseModifier
+                                                .padding(horizontal = SpacingTokens.ExtraSmall)
+                                                .border(
+                                                    width = BorderTokens.Subtle,
+                                                    color = GlassActiveBorderGold,
+                                                    shape = RoundedCornerShape(CornerTokens.Large)
+                                                )
+                                        } else {
+                                            baseModifier
+                                        }
+
+                                        when (widget) {
+                                            DashboardSection.HERO -> HeroWeatherSection(
+                                                hero = data.hero,
+                                                hourlyList = data.hourlyList,
+                                                nowcast = data.nowcast,
+                                                onLocationClick = { showLocationPicker = true },
+                                                modifier = widgetModifier
+                                            )
+                                            DashboardSection.ALERT -> SevereWeatherAlertPill(
+                                                alert = data.alert,
+                                                modifier = widgetModifier
+                                            )
+                                            DashboardSection.HOURLY -> HourlyForecastStrip(
+                                                hourlyItems = data.hourlyList,
+                                                modifier = widgetModifier
+                                            )
+                                            DashboardSection.DAILY -> DailyForecastList(
+                                                dailyList = data.dailyList,
+                                                currentTemp = data.hero.tempDegrees,
+                                                onDayClick = { selectedDay = it },
+                                                modifier = widgetModifier
+                                            )
+                                            DashboardSection.TELEMETRY -> BentoTelemetryGrid(
+                                                telemetry = data.telemetry,
+                                                hourlyList = data.hourlyList,
+                                                isDaytime = data.hero.isDaytime,
+                                                modifier = widgetModifier
+                                            )
+                                        }
+                                    }
+                                }
+                                item {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = SpacingTokens.Medium, bottom = SpacingTokens.ExtraLarge),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
+                                            modifier = Modifier
+                                                .luminousGlass(cornerRadius = CornerTokens.Pill)
+                                                .clickable {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Almanac v${com.google.weatherapp.BuildConfig.VERSION_NAME} (Code ${com.google.weatherapp.BuildConfig.VERSION_CODE})",
+                                                        Toast.LENGTH_LONG
+                                                    ).show()
+                                                }
+                                                .padding(
+                                                    horizontal = SpacingTokens.Medium,
+                                                    vertical = SpacingTokens.ExtraSmall
+                                                )
+                                        ) {
+                                            Text(
+                                                text = "Almanac",
+                                                style = EditorialStoryTextStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
+                                                color = SkyTextSecondary
+                                            )
+                                            Text(
+                                                text = "·",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = SkyTextMuted
+                                            )
+                                            Text(
+                                                text = "v${com.google.weatherapp.BuildConfig.VERSION_NAME}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = SkyTextSecondary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            selectedDay?.let { currentDay ->
+                                DayDetailModalSheet(
+                                    day = currentDay,
+                                    allDays = data.dailyList,
+                                    onSelectDay = { selectedDay = it },
+                                    onDismiss = { selectedDay = null }
+                                )
+                            }
                         }
                     }
-                }
 
-                if (showLocationPicker) {
-                    LocationPickerSheet(
-                        savedLocations = savedLocations,
-                        selectedCustomLocation = selectedCustomLocation,
-                        searchResults = searchResults,
-                        onSearchQueryChanged = { viewModel.searchCities(it) },
-                        onSelectLocation = { loc ->
-                            viewModel.selectLocation(loc)
-                            showLocationPicker = false
-                        },
-                        onRemoveSavedLocation = { viewModel.removeSavedLocation(it) },
-                        onDismiss = {
-                            viewModel.searchCities("")
-                            showLocationPicker = false
-                        }
-                    )
-                }
-
-                if (showNotificationSheet) {
-                    val successData = (uiState as? WeatherUiState.Success)?.data
-                    EveningForecastSheet(
-                        weatherData = successData,
-                        onDismiss = { showNotificationSheet = false }
-                    )
-                }
-
-                if (showUpdateDialog) {
-                    UpdateDialog(
-                        checkState = updateCheckState,
-                        downloadState = updateDownloadState,
-                        canInstallUnknownApps = canInstallUnknownApps,
-                        onDismiss = {
-                            downloadJob?.cancel()
-                            downloadJob = null
-                            showUpdateDialog = false
-                            updateDownloadState = UpdateDownloadState.Idle
-                        },
-                        onForceUpdateCheck = {
-                            downloadJob?.cancel()
-                            downloadJob = null
-                            updateCheckState = UpdateCheckState.Checking
-                            updateDownloadState = UpdateDownloadState.Idle
-                            coroutineScope.launch {
-                                updateCheckState = updateManager.checkForUpdates(forceUpdate = true)
+                    if (showLocationPicker) {
+                        LocationPickerSheet(
+                            savedLocations = savedLocations,
+                            selectedCustomLocation = selectedCustomLocation,
+                            searchResults = searchResults,
+                            onSearchQueryChanged = { viewModel.searchCities(it) },
+                            onSelectLocation = { loc ->
+                                viewModel.selectLocation(loc)
+                                showLocationPicker = false
+                            },
+                            onRemoveSavedLocation = { viewModel.removeSavedLocation(it) },
+                            onDismiss = {
+                                viewModel.searchCities("")
+                                showLocationPicker = false
                             }
-                        },
-                        onStartDownload = { url ->
-                            downloadJob?.cancel()
-                            downloadJob = coroutineScope.launch {
-                                updateDownloadState = UpdateDownloadState.Downloading(0f, 0L, 0L)
-                                val result = updateManager.downloadApk(url) { progress, read, total ->
-                                    updateDownloadState = UpdateDownloadState.Downloading(progress, read, total)
+                        )
+                    }
+
+                    if (showNotificationSheet) {
+                        val successData = (uiState as? WeatherUiState.Success)?.data
+                        EveningForecastSheet(
+                            weatherData = successData,
+                            onDismiss = { showNotificationSheet = false }
+                        )
+                    }
+
+                    if (showUpdateDialog) {
+                        UpdateDialog(
+                            checkState = updateCheckState,
+                            downloadState = updateDownloadState,
+                            canInstallUnknownApps = canInstallUnknownApps,
+                            onDismiss = {
+                                downloadJob?.cancel()
+                                downloadJob = null
+                                showUpdateDialog = false
+                                updateDownloadState = UpdateDownloadState.Idle
+                            },
+                            onForceUpdateCheck = {
+                                downloadJob?.cancel()
+                                downloadJob = null
+                                updateCheckState = UpdateCheckState.Checking
+                                updateDownloadState = UpdateDownloadState.Idle
+                                coroutineScope.launch {
+                                    updateCheckState = updateManager.checkForUpdates(forceUpdate = true)
                                 }
-                                result.onSuccess { file ->
-                                    downloadedApkFile = file
-                                    canInstallUnknownApps = updateManager.canInstallUnknownApps()
-                                    updateDownloadState = UpdateDownloadState.ReadyToInstall(file.absolutePath)
-                                }.onFailure { err ->
-                                    updateDownloadState = UpdateDownloadState.Error(err.message ?: "Download failed")
+                            },
+                            onStartDownload = { url ->
+                                downloadJob?.cancel()
+                                downloadJob = coroutineScope.launch {
+                                    updateDownloadState = UpdateDownloadState.Downloading(0f, 0L, 0L)
+                                    val result = updateManager.downloadApk(url) { progress, read, total ->
+                                        updateDownloadState = UpdateDownloadState.Downloading(progress, read, total)
+                                    }
+                                    result.onSuccess { file ->
+                                        downloadedApkFile = file
+                                        canInstallUnknownApps = updateManager.canInstallUnknownApps()
+                                        updateDownloadState = UpdateDownloadState.ReadyToInstall(file.absolutePath)
+                                    }.onFailure { err ->
+                                        updateDownloadState = UpdateDownloadState.Error(err.message ?: "Download failed")
+                                    }
                                 }
+                            },
+                            onRequestInstallPermission = {
+                                updateManager.openUnknownAppInstallSettings()
+                            },
+                            onInstallApk = {
+                                downloadedApkFile?.let { updateManager.installApk(it) }
                             }
-                        },
-                        onRequestInstallPermission = {
-                            updateManager.openUnknownAppInstallSettings()
-                        },
-                        onInstallApk = {
-                            downloadedApkFile?.let { updateManager.installApk(it) }
-                        }
-                    )
+                        )
+                    }
                 }
             }
         }

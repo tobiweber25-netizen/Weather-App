@@ -684,4 +684,17 @@ class WeatherEffectsAndDetailTest {
         val nighttimeEarly = LocalTime.of(4, 45)
         assertEquals(WeatherEffectType.CLEAR_NIGHT, getDefaultWeatherEffect(nighttimeEarly))
     }
+
+    @Test
+    fun testIsPartlyCloudyCondition_Classification() {
+        assertTrue(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Partly Cloudy"))
+        assertTrue(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Mostly Sunny"))
+        assertTrue(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Mostly Clear"))
+        assertTrue(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Scattered Clouds"))
+        assertFalse(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Clear and Sunny"))
+        assertFalse(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Overcast"))
+        assertFalse(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Scattered Rain Showers"))
+        assertFalse(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Isolated Thunderstorms"))
+        assertFalse(com.google.weatherapp.ui.components.isPartlyCloudyCondition("Dense Fog"))
+    }
 }

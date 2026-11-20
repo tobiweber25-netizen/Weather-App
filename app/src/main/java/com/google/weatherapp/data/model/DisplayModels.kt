@@ -56,7 +56,20 @@ data class HeroWeather(
     val feelsLikeReason: String = "",
     val tempP10: Int? = null,
     val tempP90: Int? = null,
-    val dispersionSummary: String? = null
+    val dispersionSummary: String? = null,
+    val modelCount: Int = 1
+)
+
+data class OfficialWeatherAlert(
+    val title: String,
+    val severity: SeverityRiskLevel,
+    val eventType: String = "",
+    val source: String = "Official Alert",
+    val areaName: String = "",
+    val description: String = "",
+    val instruction: String = "",
+    val expiresLabel: String = "",
+    val severityLabel: String = ""
 )
 
 data class SevereAlertInfo(
@@ -66,7 +79,9 @@ data class SevereAlertInfo(
     val subtitle: String,
     val isVisible: Boolean,
     val peakHourLabel: String? = null,
-    val hourlyStormProbabilities: List<Int> = emptyList()
+    val hourlyStormProbabilities: List<Int> = emptyList(),
+    val officialAlerts: List<OfficialWeatherAlert> = emptyList(),
+    val sourceLabel: String? = null
 )
 
 data class HourlyItem(
@@ -115,7 +130,10 @@ data class DailyItem(
     val nightWindDirection: String = "—",
     val hourlyForecast: List<HourlyItem>? = emptyList(),
     val confidencePercent: Int = 90,
-    val modelSpreadDegrees: Double = 0.8
+    val modelSpreadDegrees: Double = 0.8,
+    val dayRainProbability: Int = rainProbability,
+    val nightRainProbability: Int = rainProbability,
+    val nightWind: String = ""
 ) {
     val hourlyList: List<HourlyItem> get() = hourlyForecast ?: emptyList()
 }
@@ -140,7 +158,10 @@ data class BentoTelemetry(
     val visibilityKm: Double = 10.0,
     val sunProgress: Float = 0.5f,
     val feelsLikeDegrees: Int = 22,
-    val feelsLikeReason: String = "Similar to the actual temperature"
+    val feelsLikeReason: String = "Similar to the actual temperature",
+    val dominantPollutantLabel: String = "",
+    val aqiScaleLabel: String = "US AQI",
+    val pressureLabel: String = "hPa • Sea level"
 )
 
 data class MinutelyPrecipInterval(
@@ -157,7 +178,10 @@ data class PrecipitationNowcast(
     val nextPrecipitationOnsetMinutes: Int? = null,
     val maxRateMmH: Double = 0.0,
     val intervals: List<MinutelyPrecipInterval> = emptyList(),
-    val rainCessationMinutes: Int? = null
+    val rainCessationMinutes: Int? = null,
+    val isHighRes15Min: Boolean = true,
+    val headlineLabel: String = "SHORT-TERM RAIN FORECAST",
+    val onsetRateMmH: Double = maxRateMmH
 )
 
 data class EnsembleDispersion(

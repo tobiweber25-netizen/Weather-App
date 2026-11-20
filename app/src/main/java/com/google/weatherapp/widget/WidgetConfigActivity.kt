@@ -3,41 +3,25 @@ package com.google.weatherapp.widget
 import android.app.Activity
 import android.appwidget.AppWidgetManager
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,23 +31,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import com.google.weatherapp.data.local.WeatherLocalDataSource
-import com.google.weatherapp.theme.BorderTokens
-import com.google.weatherapp.theme.CornerTokens
-import com.google.weatherapp.theme.GlassCardBackgroundDark
-import com.google.weatherapp.theme.GlassCardBackgroundLight
-import com.google.weatherapp.theme.GlassCardBorderLight
-import com.google.weatherapp.theme.IconSizeTokens
-import com.google.weatherapp.theme.OnPrimaryLight
-import com.google.weatherapp.theme.PrimaryDark
-import com.google.weatherapp.theme.SkyNightClearEnd
-import com.google.weatherapp.theme.SkyNightClearMid
-import com.google.weatherapp.theme.SkyNightClearStart
-import com.google.weatherapp.theme.SkyTextMuted
-import com.google.weatherapp.theme.SkyTextPrimary
-import com.google.weatherapp.theme.SkyTextSecondary
-import com.google.weatherapp.theme.SpacingTokens
-import com.google.weatherapp.theme.Transparent
-import com.google.weatherapp.theme.WeatherAppTheme
+import com.google.weatherapp.theme.*
+import com.google.weatherapp.ui.components.luminousGlass
 
 class WidgetConfigActivity : ComponentActivity() {
 
@@ -71,7 +40,10 @@ class WidgetConfigActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+        )
 
         setResult(Activity.RESULT_CANCELED)
         appWidgetId = intent?.extras?.getInt(
@@ -154,7 +126,6 @@ private fun WidgetConfigScreen(
                 Text(
                     text = kind.title,
                     style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
                     color = SkyTextPrimary
                 )
                 Text(
@@ -168,13 +139,7 @@ private fun WidgetConfigScreen(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(CornerTokens.Large))
-                    .background(GlassCardBackgroundDark)
-                    .border(
-                        width = BorderTokens.Hairline,
-                        color = GlassCardBorderLight,
-                        shape = RoundedCornerShape(CornerTokens.Large)
-                    )
+                    .luminousGlass(cornerRadius = CornerTokens.Large, elevated = true)
                     .padding(SpacingTokens.Large),
                 contentAlignment = Alignment.Center
             ) {
@@ -200,12 +165,11 @@ private fun WidgetConfigScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(RoundedCornerShape(CornerTokens.Medium))
-                            .background(if (isSelected) GlassCardBackgroundLight else GlassCardBackgroundDark)
-                            .border(
-                                width = if (isSelected) BorderTokens.Subtle else BorderTokens.Hairline,
-                                color = if (isSelected) PrimaryDark else GlassCardBorderLight,
-                                shape = RoundedCornerShape(CornerTokens.Medium)
+                            .luminousGlass(
+                                cornerRadius = CornerTokens.Medium,
+                                elevated = isSelected,
+                                accentBorderColor = if (isSelected) PrimaryDark else null,
+                                borderWidth = if (isSelected) BorderTokens.Subtle else BorderTokens.Hairline
                             )
                             .clickable { selectedStyle = styleOption }
                             .padding(SpacingTokens.Base)
@@ -271,7 +235,7 @@ private fun WidgetConfigScreen(
                     text = "Apply Widget to Home Screen",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = OnPrimaryLight.copy(alpha = 0f).let { SkyNightClearStart }
+                    color = SkyNightClearStart
                 )
             }
         }

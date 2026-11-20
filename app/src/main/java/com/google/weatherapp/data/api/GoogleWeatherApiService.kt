@@ -3,6 +3,7 @@ package com.google.weatherapp.data.api
 import com.google.weatherapp.data.model.CurrentConditionsResponse
 import com.google.weatherapp.data.model.DailyForecastResponse
 import com.google.weatherapp.data.model.HourlyForecastResponse
+import com.google.weatherapp.data.model.PublicAlertsResponse
 import retrofit2.http.GET
 import retrofit2.http.Query
 
@@ -38,6 +39,14 @@ interface GoogleWeatherApiService {
         @Query("days") days: Int = 10,
         @Query("pageSize") pageSize: Int = 10
     ): DailyForecastResponse
+
+    @GET("publicAlerts:lookup")
+    suspend fun getPublicAlerts(
+        @Query("key") apiKey: String,
+        @Query("location.latitude") latitude: Double,
+        @Query("location.longitude") longitude: Double,
+        @Query("languageCode") languageCode: String = "en"
+    ): PublicAlertsResponse
 
     // Aliases to support lookupHours and lookupDays naming conventions
     @GET("forecast/hours:lookup")

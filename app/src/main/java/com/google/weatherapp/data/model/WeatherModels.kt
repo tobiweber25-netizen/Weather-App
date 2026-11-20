@@ -19,7 +19,36 @@ data class CurrentConditionsResponse(
     @SerializedName("airPressure") val airPressure: AirPressure? = null,
     @SerializedName("thunderstormProbability") val thunderstormProbability: Int? = null,
     @SerializedName("isDaytime") val isDaytime: Boolean? = null,
-    @SerializedName("sunEvents") val sunEvents: SunEvents? = null
+    @SerializedName("sunEvents") val sunEvents: SunEvents? = null,
+    @SerializedName("cloudCover") val cloudCover: Int? = null,
+    @SerializedName("currentConditionsHistory") val currentConditionsHistory: CurrentConditionsHistory? = null
+)
+
+data class CurrentConditionsHistory(
+    @SerializedName("temperatureChange") val temperatureChange: Temperature? = null,
+    @SerializedName("maxTemperature") val maxTemperature: Temperature? = null,
+    @SerializedName("minTemperature") val minTemperature: Temperature? = null,
+    @SerializedName("qpf") val qpf: PrecipQuantity? = null,
+    @SerializedName("snowQpf") val snowQpf: PrecipQuantity? = null
+)
+
+data class PublicAlertsResponse(
+    @SerializedName("weatherAlerts") val weatherAlerts: List<GooglePublicAlert>? = null,
+    @SerializedName("regionCode") val regionCode: String? = null
+)
+
+data class GooglePublicAlert(
+    @SerializedName("alertId") val alertId: String? = null,
+    @SerializedName("alertTitle") val alertTitle: ConditionDescription? = null,
+    @SerializedName("eventType") val eventType: String? = null,
+    @SerializedName("areaName") val areaName: String? = null,
+    @SerializedName("severity") val severity: String? = null,
+    @SerializedName("urgency") val urgency: String? = null,
+    @SerializedName("certainty") val certainty: String? = null,
+    @SerializedName("startTime") val startTime: String? = null,
+    @SerializedName("expirationTime") val expirationTime: String? = null,
+    @SerializedName("description") val description: String? = null,
+    @SerializedName("instruction") val instruction: List<String>? = null
 )
 
 data class HourlyForecastResponse(

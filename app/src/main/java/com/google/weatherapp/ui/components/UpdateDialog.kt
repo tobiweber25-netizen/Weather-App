@@ -18,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -40,7 +41,7 @@ fun UpdateDialog(
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            shape = RoundedCornerShape(CornerTokens.Large),
+            shape = RoundedCornerShape(CornerTokens.ExtraLarge),
             color = MaterialTheme.colorScheme.surface,
             tonalElevation = ElevationTokens.Level3,
             border = BorderStroke(BorderTokens.Hairline, MaterialTheme.colorScheme.outline),
@@ -99,7 +100,6 @@ fun UpdateDialog(
                         )
                     }
                     else -> {
-                        // Idle or unhandled
                         CheckingContent()
                     }
                 }
@@ -169,13 +169,12 @@ private fun UpToDateContent(
                 }
         )
         Text(
-            text = "You're up to date!",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
+            text = "You’re up to date",
+            style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
         Text(
-            text = "Weather App v$currentVersion is currently the newest version available.",
+            text = "Almanac v$currentVersion is currently the newest version available.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -207,7 +206,7 @@ private fun UpToDateContent(
             shape = RoundedCornerShape(CornerTokens.Pill),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(text = "OK", style = MaterialTheme.typography.labelLarge)
+            Text(text = "Done", style = MaterialTheme.typography.labelLarge)
         }
     }
 }
@@ -239,8 +238,7 @@ private fun UpdateAvailableContent(
         )
         Text(
             text = "Update Available",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
         Surface(
@@ -248,7 +246,7 @@ private fun UpdateAvailableContent(
             shape = RoundedCornerShape(CornerTokens.Pill)
         ) {
             Text(
-                text = "v${update.currentVersion}  ➔  v${update.newVersion}" + if (formattedSize.isNotBlank()) "  ($formattedSize)" else "",
+                text = "v${update.currentVersion}  →  v${update.newVersion}" + if (formattedSize.isNotBlank()) "  ($formattedSize)" else "",
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -263,7 +261,7 @@ private fun UpdateAvailableContent(
                     .heightIn(max = ComponentTokens.HeroCardMinHeight)
                     .background(
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        shape = RoundedCornerShape(CornerTokens.Small)
+                        shape = RoundedCornerShape(CornerTokens.Medium)
                     )
                     .padding(SpacingTokens.Medium)
                     .verticalScroll(scrollState)
@@ -325,9 +323,8 @@ private fun DownloadingContent(downloadState: UpdateDownloadState.Downloading) {
             modifier = Modifier.size(IconSizeTokens.ExtraLarge)
         )
         Text(
-            text = "Downloading Update...",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold,
+            text = "Downloading Update",
+            style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
         if (downloadState.totalBytes > 0) {
@@ -335,7 +332,8 @@ private fun DownloadingContent(downloadState: UpdateDownloadState.Downloading) {
                 progress = { downloadState.progress.coerceIn(0f, 1f) },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(SpacingTokens.Small),
+                    .height(SpacingTokens.Small)
+                    .clip(RoundedCornerShape(CornerTokens.Pill)),
                 color = MaterialTheme.colorScheme.primary,
                 trackColor = MaterialTheme.colorScheme.surfaceVariant
             )
@@ -343,7 +341,8 @@ private fun DownloadingContent(downloadState: UpdateDownloadState.Downloading) {
             LinearProgressIndicator(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(SpacingTokens.Small),
+                    .height(SpacingTokens.Small)
+                    .clip(RoundedCornerShape(CornerTokens.Pill)),
                 color = MaterialTheme.colorScheme.primary,
                 trackColor = MaterialTheme.colorScheme.surfaceVariant
             )
@@ -378,12 +377,11 @@ private fun ReadyToInstallContent(
         )
         Text(
             text = "Download Complete",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
         Text(
-            text = "The update is ready to install. Android will now update your app.",
+            text = "The update is ready to install. Android will now update Almanac.",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -426,8 +424,7 @@ private fun ErrorContent(
         )
         Text(
             text = title,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
         Text(

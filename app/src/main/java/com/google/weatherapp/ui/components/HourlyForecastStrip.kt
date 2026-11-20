@@ -1,10 +1,11 @@
 package com.google.weatherapp.ui.components
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -21,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -47,10 +49,6 @@ fun HourlyForecastStrip(
     modifier: Modifier = Modifier,
     onVisibleHourChanged: ((HourlyItem) -> Unit)? = null
 ) {
-    val isDark = isSystemInDarkTheme()
-    val cardBg = if (isDark) GlassCardBackgroundDark else GlassCardBackgroundLight
-    val cardBorder = if (isDark) GlassCardBorderDark else GlassCardBorderLight
-
     var selectedMode by remember { mutableStateOf(HourlyDimensionMode.TEMP) }
 
     val listState = rememberLazyListState()
@@ -83,21 +81,26 @@ fun HourlyForecastStrip(
     val minMetric = metricValues.minOrNull() ?: 0f
     val maxMetric = metricValues.maxOrNull() ?: 1f
 
+    val curveAccentColor by animateColorAsState(
+        targetValue = when (selectedMode) {
+            HourlyDimensionMode.TEMP -> SunCoreGold
+            HourlyDimensionMode.PRECIP -> RainDropCyan
+            HourlyDimensionMode.WIND -> TempBarCoolColor
+            HourlyDimensionMode.UV -> UvHighOrange
+        },
+        animationSpec = tween(durationMillis = 300),
+        label = "hourly_curve_accent"
+    )
+
     Column(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = SpacingTokens.Base)
-            .clip(RoundedCornerShape(CornerTokens.Large))
-            .background(cardBg)
-            .border(
-                width = BorderTokens.Hairline,
-                color = cardBorder,
-                shape = RoundedCornerShape(CornerTokens.Large)
-            )
+            .luminousGlass(cornerRadius = CornerTokens.Large)
             .padding(vertical = SpacingTokens.Medium),
         verticalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
     ) {
-        // Section Header + Mercury-Style Multi-Dimension Mode Selector Pills
+        // Header + Recessed Frosted Segmented Mode Selector
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -122,9 +125,19 @@ fun HourlyForecastStrip(
                 )
             }
 
+            // Segmented frosted capsule track
             Row(
-                horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Micro),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(CornerTokens.Pill))
+                    .background(GlassSegmentedTrackBg)
+                    .border(
+                        width = BorderTokens.Hairline,
+                        color = GlassCardDividerColor,
+                        shape = RoundedCornerShape(CornerTokens.Pill)
+                    )
+                    .padding(SpacingTokens.Micro)
             ) {
                 HourlyDimensionMode.entries.forEach { mode ->
                     val isSelected = mode == selectedMode
@@ -134,13 +147,13 @@ fun HourlyForecastStrip(
                             .background(if (isSelected) GlassPillHighlight else Transparent)
                             .border(
                                 width = BorderTokens.Hairline,
-                                color = if (isSelected) GlassCardBorderLight else Transparent,
+                                color = if (isSelected) GlassRimSpecularTop else Transparent,
                                 shape = RoundedCornerShape(CornerTokens.Pill)
                             )
                             .clickable { selectedMode = mode }
                             .padding(
                                 horizontal = SpacingTokens.Small,
-                                vertical = SpacingTokens.Micro
+                                vertical = SpacingTokens.ExtraSmall
                             )
                     ) {
                         Text(
@@ -160,11 +173,12 @@ fun HourlyForecastStrip(
             color = GlassCardDividerColor
         )
 
+        // Zero-gap LazyRow so adjacent spline segments weld seamlessly edge-to-edge
         LazyRow(
             state = listState,
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
-            contentPadding = PaddingValues(horizontal = SpacingTokens.Base)
+            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.None),
+            contentPadding = PaddingValues(horizontal = SpacingTokens.Medium)
         ) {
             itemsIndexed(hourlyItems) { index, item ->
                 val prevVal = metricValues.getOrNull(index - 1)
@@ -178,7 +192,10 @@ fun HourlyForecastStrip(
                     currVal = currVal,
                     nextVal = nextVal,
                     minVal = minMetric,
-                    maxVal = maxMetric
+                    maxVal = maxMetric,
+                    accentColor = curveAccentColor,
+                    isFirst = index == 0,
+                    isLast = index == hourlyItems.lastIndex
                 )
             }
         }
@@ -198,6 +215,9 @@ internal fun HourlyItemCard(
         nextVal = null,
         minVal = item.tempDegrees.toFloat() - 5f,
         maxVal = item.tempDegrees.toFloat() + 5f,
+        accentColor = SunCoreGold,
+        isFirst = true,
+        isLast = true,
         modifier = modifier
     )
 }
@@ -211,6 +231,9 @@ private fun HourlyItemCard(
     nextVal: Float?,
     minVal: Float,
     maxVal: Float,
+    accentColor: Color,
+    isFirst: Boolean,
+    isLast: Boolean,
     modifier: Modifier = Modifier
 ) {
     val isNow = item.hourLabel.equals("Now", ignoreCase = true)
@@ -229,68 +252,91 @@ private fun HourlyItemCard(
         HourlyDimensionMode.UV -> "${item.tempDegrees}°"
     }
 
-    val curveAccentColor = when (mode) {
-        HourlyDimensionMode.TEMP -> SunCoreGold
-        HourlyDimensionMode.PRECIP -> RainDropCyan
-        HourlyDimensionMode.WIND -> TempBarCoolColor
-        HourlyDimensionMode.UV -> UvHighOrange
-    }
-
-    Column(
+    Box(
         modifier = modifier
             .width(ComponentTokens.HourlyCardWidth)
             .height(ComponentTokens.HourlyCardHeight)
-            .clip(RoundedCornerShape(CornerTokens.Medium))
-            .background(if (isNow) GlassPillHighlight else Transparent)
-            .border(
-                width = BorderTokens.Hairline,
-                color = if (isNow) GlassCardBorderLight else Transparent,
-                shape = RoundedCornerShape(CornerTokens.Medium)
-            )
-            .padding(vertical = SpacingTokens.Small, horizontal = SpacingTokens.ExtraSmall),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(
-            text = if (isNow) "Now" else item.hourLabel,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = if (isNow) FontWeight.Bold else FontWeight.Medium,
-            color = if (isNow) SkyTextPrimary else SkyTextSecondary,
-            maxLines = 1
-        )
+        // Subtle vertical glass pill highlight behind "Now" column (inset horizontally so curve stays unbroken)
+        if (isNow) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = SpacingTokens.ExtraSmall, vertical = SpacingTokens.Micro)
+                    .clip(RoundedCornerShape(CornerTokens.Medium))
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                GlassPillHighlight,
+                                GlassInnerTopSheen
+                            )
+                        )
+                    )
+                    .border(
+                        width = BorderTokens.Hairline,
+                        brush = Brush.verticalGradient(
+                            colors = listOf(GlassRimSpecularTop, GlassRimSpecularBottom)
+                        ),
+                        shape = RoundedCornerShape(CornerTokens.Medium)
+                    )
+            )
+        }
 
-        NothingWeatherIcon(
-            effectType = com.google.weatherapp.ui.resolveActiveEffectForHourly(item),
-            modifier = Modifier.size(IconSizeTokens.Large)
-        )
-
-        // Continuous Bezier Curve Segment connecting adjacent hours
-        HourlyCurveSegment(
-            prevVal = prevVal,
-            currVal = currVal,
-            nextVal = nextVal,
-            minVal = minVal,
-            maxVal = maxVal,
-            accentColor = curveAccentColor,
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(ComponentTokens.HourlyCurveCanvasHeight)
-        )
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                .fillMaxSize()
+                .padding(vertical = SpacingTokens.Small),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
             Text(
-                text = primaryReadout,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = SkyTextPrimary,
+                text = if (isNow) "Now" else item.hourLabel,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = if (isNow) FontWeight.Bold else FontWeight.Medium,
+                color = if (isNow) SkyTextPrimary else SkyTextSecondary,
                 maxLines = 1
             )
-            if (subReadout.isNotEmpty()) {
+
+            NothingWeatherIcon(
+                effectType = com.google.weatherapp.ui.resolveActiveEffectForHourly(item),
+                isPartlyCloudy = isPartlyCloudyCondition(item.conditionText),
+                isDaytime = item.isDaytime,
+                animate = false,
+                modifier = Modifier.size(IconSizeTokens.Large)
+            )
+
+            // Seamless edge-to-edge continuous Bezier spline with soft gradient area fill
+            HourlyCurveSegment(
+                prevVal = prevVal,
+                currVal = currVal,
+                nextVal = nextVal,
+                minVal = minVal,
+                maxVal = maxVal,
+                accentColor = accentColor,
+                isNow = isNow,
+                isFirst = isFirst,
+                isLast = isLast,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(ComponentTokens.HourlyCurveCanvasHeight)
+            )
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.padding(horizontal = SpacingTokens.ExtraSmall)
+            ) {
                 Text(
-                    text = subReadout,
+                    text = primaryReadout,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = SkyTextPrimary,
+                    maxLines = 1
+                )
+                Text(
+                    text = subReadout.ifEmpty { " " },
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (mode == HourlyDimensionMode.TEMP) RainDropCyan else SkyTextMuted,
+                    color = if (subReadout.isEmpty()) Transparent else if (mode == HourlyDimensionMode.TEMP) RainDropCyan else SkyTextMuted,
                     maxLines = 1
                 )
             }
@@ -299,13 +345,16 @@ private fun HourlyItemCard(
 }
 
 @Composable
-private fun HourlyCurveSegment(
+internal fun HourlyCurveSegment(
     prevVal: Float?,
     currVal: Float,
     nextVal: Float?,
     minVal: Float,
     maxVal: Float,
     accentColor: Color,
+    isNow: Boolean = false,
+    isFirst: Boolean = false,
+    isLast: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -316,30 +365,107 @@ private fun HourlyCurveSegment(
         val range = (maxVal - minVal).takeIf { it > 0.01f } ?: 1f
         fun normY(v: Float): Float {
             val ratio = ((v - minVal) / range).coerceIn(0f, 1f)
-            return size.height * (0.82f - ratio * 0.64f)
+            return size.height * (0.76f - ratio * 0.56f)
         }
 
         val cy = normY(currVal)
         val cx = size.width * 0.5f
-        val leftY = if (prevVal != null) normY((prevVal + currVal) * 0.5f) else cy
-        val rightY = if (nextVal != null) normY((currVal + nextVal) * 0.5f) else cy
+        val prevY = if (prevVal != null) normY(prevVal) else cy
+        val nextY = if (nextVal != null) normY(nextVal) else cy
+        val leftY = (prevY + cy) * 0.5f
+        val rightY = (cy + nextY) * 0.5f
 
-        val path = Path().apply {
-            moveTo(0f, leftY)
-            quadraticTo(cx * 0.5f, cy, cx, cy)
-            quadraticTo(cx + cx * 0.5f, cy, size.width, rightY)
+        // C1-continuous Hermite slopes match seamlessly across cell boundaries with zero staircasing
+        val mLeft = (cy - prevY) / size.width
+        val mRight = (nextY - cy) / size.width
+        val mCurr = (nextY - prevY) / (2f * size.width)
+        val dxThird = cx / 3f
+
+        val leftStartX = if (isFirst) cx else 0f
+        val rightEndX = if (isLast) cx else size.width
+
+        val strokePath = Path().apply {
+            if (!isFirst && !isLast) {
+                moveTo(0f, leftY)
+                cubicTo(
+                    dxThird, leftY + mLeft * dxThird,
+                    cx - dxThird, cy - mCurr * dxThird,
+                    cx, cy
+                )
+                cubicTo(
+                    cx + dxThird, cy + mCurr * dxThird,
+                    size.width - dxThird, rightY - mRight * dxThird,
+                    size.width, rightY
+                )
+            } else if (isFirst && !isLast) {
+                moveTo(cx, cy)
+                cubicTo(
+                    cx + dxThird, cy + mCurr * dxThird,
+                    size.width - dxThird, rightY - mRight * dxThird,
+                    size.width, rightY
+                )
+            } else if (!isFirst && isLast) {
+                moveTo(0f, leftY)
+                cubicTo(
+                    dxThird, leftY + mLeft * dxThird,
+                    cx - dxThird, cy - mCurr * dxThird,
+                    cx, cy
+                )
+            } else {
+                moveTo(cx * 0.4f, cy)
+                lineTo(cx * 1.6f, cy)
+            }
         }
 
+        // Soft vertical gradient fill beneath the curve
+        val fillPath = Path().apply {
+            addPath(strokePath)
+            lineTo(rightEndX, size.height)
+            lineTo(leftStartX, size.height)
+            close()
+        }
         drawPath(
-            path = path,
-            color = accentColor.copy(alpha = 0.78f),
+            path = fillPath,
+            brush = Brush.verticalGradient(
+                colors = listOf(
+                    accentColor.copy(alpha = 0.24f),
+                    Transparent
+                ),
+                startY = 0f,
+                endY = size.height
+            )
+        )
+
+        // Luminous spline stroke
+        drawPath(
+            path = strokePath,
+            color = accentColor.copy(alpha = 0.90f),
             style = Stroke(width = strokePx, cap = StrokeCap.Round)
         )
 
-        drawCircle(
-            color = PureWhite,
-            radius = dotPx * 0.85f,
-            center = Offset(cx, cy)
-        )
+        // Halo + anchor dot (accentuated on "Now")
+        if (isNow) {
+            drawCircle(
+                color = accentColor.copy(alpha = 0.35f),
+                radius = dotPx * 1.8f,
+                center = Offset(cx, cy)
+            )
+            drawCircle(
+                color = PureWhite,
+                radius = dotPx * 0.95f,
+                center = Offset(cx, cy)
+            )
+        } else {
+            drawCircle(
+                color = accentColor.copy(alpha = 0.28f),
+                radius = dotPx * 1.15f,
+                center = Offset(cx, cy)
+            )
+            drawCircle(
+                color = PureWhite,
+                radius = dotPx * 0.68f,
+                center = Offset(cx, cy)
+            )
+        }
     }
 }
