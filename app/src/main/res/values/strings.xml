@@ -1,6 +1,10 @@
 <resources>
     <string name="app_name">Almanac</string>
 
+    <string name="widget_lock_screen_label">Lock Screen Weather</string>
+    <string name="widget_lock_screen_desc">Simple current temperature and weather icon for your lock screen.</string>
+    <string name="widget_lock_screen_preview_temp">23°</string>
+
     <string name="widget_today_compact_label">Today Weather</string>
     <string name="widget_today_compact_desc">Current temperature, condition, and high/low in a compact 2×2 card.</string>
 

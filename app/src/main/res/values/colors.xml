@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_preview_pill_bg">#D90D172B</color>
+    <color name="widget_preview_pill_border">#42FFFFFF</color>
+    <color name="widget_preview_sun_gold">#FFFFD666</color>
+    <color name="widget_preview_cloud_white">#FFFDFBF7</color>
+    <color name="widget_preview_text_primary">#FFFDFBF7</color>
+</resources>

@@ -6,8 +6,16 @@ enum class WidgetKind(
     val title: String,
     val subtitle: String,
     val defaultWidthDp: Int,
-    val defaultHeightDp: Int
+    val defaultHeightDp: Int,
+    val defaultBackgroundStyle: WidgetBackgroundStyle = WidgetBackgroundStyle.LIVING_SKY
 ) {
+    LOCK_SCREEN(
+        title = "Lock Screen Weather",
+        subtitle = "Simple current temperature and weather icon (2×1)",
+        defaultWidthDp = 156,
+        defaultHeightDp = 64,
+        defaultBackgroundStyle = WidgetBackgroundStyle.TRANSLUCENT
+    ),
     TODAY_COMPACT(
         title = "Today Weather",
         subtitle = "Current conditions, temperature & high/low (2×2)",
@@ -44,19 +52,22 @@ enum class WidgetBackgroundStyle(
     ),
     TRANSLUCENT(
         displayName = "Fully Translucent",
-        description = "Clear glass overlay letting your home screen wallpaper shine through"
+        description = "Clear glass overlay letting your wallpaper shine through"
     )
 }
 
 class WidgetPreferences(context: Context) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    fun getBackgroundStyle(appWidgetId: Int): WidgetBackgroundStyle {
-        val raw = prefs.getString(styleKey(appWidgetId), null) ?: return WidgetBackgroundStyle.LIVING_SKY
+    fun getBackgroundStyle(
+        appWidgetId: Int,
+        defaultStyle: WidgetBackgroundStyle = WidgetBackgroundStyle.LIVING_SKY
+    ): WidgetBackgroundStyle {
+        val raw = prefs.getString(styleKey(appWidgetId), null) ?: return defaultStyle
         return try {
             WidgetBackgroundStyle.valueOf(raw)
         } catch (_: IllegalArgumentException) {
-            WidgetBackgroundStyle.LIVING_SKY
+            defaultStyle
         }
     }
 

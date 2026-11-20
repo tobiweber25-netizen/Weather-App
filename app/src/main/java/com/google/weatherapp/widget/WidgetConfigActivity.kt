@@ -58,7 +58,10 @@ class WidgetConfigActivity : ComponentActivity() {
 
         val prefs = WidgetPreferences(this)
         val kind = WeatherWidgetUpdater.resolveWidgetKind(this, appWidgetId)
-        val initialStyle = prefs.getBackgroundStyle(appWidgetId)
+        val initialStyle = prefs.getBackgroundStyle(
+            appWidgetId = appWidgetId,
+            defaultStyle = kind.defaultBackgroundStyle
+        )
 
         setContent {
             WeatherAppTheme(darkTheme = true) {
@@ -147,7 +150,11 @@ private fun WidgetConfigScreen(
                     bitmap = previewBitmap.asImageBitmap(),
                     contentDescription = kind.title,
                     contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = if (kind == WidgetKind.LOCK_SCREEN) {
+                        Modifier.widthIn(max = ComponentTokens.LockScreenPreviewMaxWidth)
+                    } else {
+                        Modifier.fillMaxWidth()
+                    }
                 )
             }
 
@@ -232,7 +239,11 @@ private fun WidgetConfigScreen(
                     .height(SpacingTokens.Jumbo)
             ) {
                 Text(
-                    text = "Apply Widget to Home Screen",
+                    text = if (kind == WidgetKind.LOCK_SCREEN) {
+                        "Apply Lock Screen Widget"
+                    } else {
+                        "Apply Widget to Home Screen"
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = SkyNightClearStart

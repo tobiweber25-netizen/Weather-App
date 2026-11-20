@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 object WeatherWidgetUpdater {
 
     private val providerMap: List<Pair<Class<out BaseWeatherWidgetProvider>, WidgetKind>> = listOf(
+        LockScreenWidgetReceiver::class.java to WidgetKind.LOCK_SCREEN,
         TodayCompactWidgetReceiver::class.java to WidgetKind.TODAY_COMPACT,
         TodayHybridWidgetReceiver::class.java to WidgetKind.TODAY_HYBRID,
         HourlyForecastWidgetReceiver::class.java to WidgetKind.HOURLY_FORECAST,
@@ -67,9 +68,14 @@ object WeatherWidgetUpdater {
         val minW = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_WIDTH, 0)
             .takeIf { it > 0 } ?: kind.defaultWidthDp
         val maxH = opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 0)
-            .takeIf { it > 0 } ?: kind.defaultHeightDp
+            .takeIf { it > 0 }
+            ?: opts.getInt(AppWidgetManager.OPTION_APPWIDGET_MIN_HEIGHT, 0).takeIf { it > 0 }
+            ?: kind.defaultHeightDp
 
-        val style = WidgetPreferences(appContext).getBackgroundStyle(appWidgetId)
+        val style = WidgetPreferences(appContext).getBackgroundStyle(
+            appWidgetId = appWidgetId,
+            defaultStyle = kind.defaultBackgroundStyle
+        )
         val data = preloadedData ?: WeatherLocalDataSource(appContext).getLatestCachedWeatherIgnoringTtl()
 
         val bitmap = WeatherWidgetRenderer.renderWidgetBitmap(
@@ -91,7 +97,12 @@ object WeatherWidgetUpdater {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val views = RemoteViews(appContext.packageName, R.layout.weather_widget_canvas).apply {
+        val layoutRes = if (kind == WidgetKind.LOCK_SCREEN) {
+            R.layout.weather_widget_lockscreen
+        } else {
+            R.layout.weather_widget_canvas
+        }
+        val views = RemoteViews(appContext.packageName, layoutRes).apply {
             setImageViewBitmap(R.id.widget_canvas_image, bitmap)
             setOnClickPendingIntent(R.id.widget_root_container, pendingIntent)
         }
@@ -204,6 +215,9 @@ abstract class BaseWeatherWidgetProvider(
         appWidgetIds.forEach { prefs.clearWidget(it) }
     }
 }
+
+/** 0. Lock Screen Minimal (2x1 / 1x1) */
+class LockScreenWidgetReceiver : BaseWeatherWidgetProvider(WidgetKind.LOCK_SCREEN)
 
 /** 1. Today Weather Compact (2x2) */
 class TodayCompactWidgetReceiver : BaseWeatherWidgetProvider(WidgetKind.TODAY_COMPACT)

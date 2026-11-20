@@ -6,6 +6,8 @@ import android.graphics.Canvas
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RadialGradient
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -67,10 +69,20 @@ object WeatherWidgetRenderer {
         val density = context.resources.displayMetrics.density.coerceIn(1.5f, 3.0f)
         val fonts = loadTypefaces(context)
 
-        val safeWidthDp = widthDp.coerceIn(110, 460)
-        val safeHeightDp = heightDp.coerceIn(96, 460)
-        val widthPx = (safeWidthDp * density).toInt().coerceAtLeast(200)
-        val heightPx = (safeHeightDp * density).toInt().coerceAtLeast(180)
+        val (safeWidthDp, safeHeightDp) = if (kind == WidgetKind.LOCK_SCREEN) {
+            resolveLockScreenCanvasSizeDp(widthDp, heightDp)
+        } else {
+            widthDp.coerceIn(110, 460) to heightDp.coerceIn(96, 460)
+        }
+        val renderDensity = if (kind == WidgetKind.LOCK_SCREEN) {
+            maxOf(density, 2.5f)
+        } else {
+            density
+        }
+        val minWidthPx = if (kind == WidgetKind.LOCK_SCREEN) 96 else 200
+        val minHeightPx = if (kind == WidgetKind.LOCK_SCREEN) 80 else 180
+        val widthPx = (safeWidthDp * renderDensity).toInt().coerceAtLeast(minWidthPx)
+        val heightPx = (safeHeightDp * renderDensity).toInt().coerceAtLeast(minHeightPx)
 
         val bitmap = Bitmap.createBitmap(widthPx, heightPx, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bitmap)
@@ -79,18 +91,21 @@ object WeatherWidgetRenderer {
         val h = heightPx.toFloat()
         val effect = resolveActiveEffect(weather.hero)
 
-        drawCardBackground(
-            canvas = canvas,
-            w = w,
-            h = h,
-            density = density,
-            effect = effect,
-            style = style,
-            isDaytime = weather.hero.isDaytime
-        )
-
         val isTranslucent = style == WidgetBackgroundStyle.TRANSLUCENT
+        if (!(kind == WidgetKind.LOCK_SCREEN && isTranslucent)) {
+            drawCardBackground(
+                canvas = canvas,
+                w = w,
+                h = h,
+                density = renderDensity,
+                effect = effect,
+                style = style,
+                isDaytime = weather.hero.isDaytime
+            )
+        }
+
         when (kind) {
+            WidgetKind.LOCK_SCREEN -> drawLockScreen(canvas, w, h, renderDensity, weather, effect, isTranslucent, fonts)
             WidgetKind.TODAY_COMPACT -> drawTodayCompact(canvas, w, h, density, weather, effect, isTranslucent, fonts)
             WidgetKind.TODAY_HYBRID -> drawTodayHybrid(canvas, w, h, density, weather, effect, isTranslucent, fonts)
             WidgetKind.HOURLY_FORECAST -> drawHourlyForecast(canvas, w, h, density, weather, effect, isTranslucent, fonts)
@@ -98,6 +113,15 @@ object WeatherWidgetRenderer {
         }
 
         return bitmap
+    }
+
+    internal fun resolveLockScreenCanvasSizeDp(widthDp: Int, heightDp: Int): Pair<Int, Int> {
+        return widthDp.coerceIn(48, 460) to heightDp.coerceIn(40, 460)
+    }
+
+    internal fun isLockScreenHorizontalLayout(widthDp: Int, heightDp: Int): Boolean {
+        if (heightDp <= 0) return true
+        return widthDp.toFloat() >= heightDp.toFloat() * 1.25f
     }
 
     /**
@@ -133,7 +157,7 @@ object WeatherWidgetRenderer {
         style: WidgetBackgroundStyle,
         isDaytime: Boolean = true
     ) {
-        val cornerPx = CornerTokens.Large.value * density
+        val cornerPx = minOf(CornerTokens.Large.value * density, minOf(w, h) * 0.48f)
         val inset = BorderTokens.Hairline.value * density * 0.5f
         val rect = RectF(inset, inset, w - inset, h - inset)
 
@@ -212,6 +236,158 @@ object WeatherWidgetRenderer {
             )
         }
         canvas.drawRoundRect(rect, cornerPx, cornerPx, borderPaint)
+    }
+
+    /**
+     * 0. Lock Screen Minimal (2x1 / 1x1): simple weather icon + current temperature only.
+     */
+    private fun drawLockScreen(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        density: Float,
+        weather: WeatherDashboardData,
+        effect: WeatherEffectType,
+        isTranslucent: Boolean,
+        fonts: WidgetTypefaces
+    ) {
+        val hero = weather.hero
+        val tempText = "${hero.tempDegrees}°"
+        val isPartlyCloudy = isPartlyCloudyCondition(hero.conditionText)
+        val horizontal = isLockScreenHorizontalLayout(w.toInt(), h.toInt())
+
+        val tempPaint = buildTextPaint(
+            sp = 28f,
+            density = density,
+            color = SkyTextPrimary,
+            weight = fonts.sansMedium,
+            align = if (horizontal) Paint.Align.LEFT else Paint.Align.CENTER,
+            isTranslucent = isTranslucent
+        )
+
+        fun drawIconWithContrast(cx: Float, cy: Float, sizePx: Float) {
+            if (isTranslucent) {
+                val haloRadius = sizePx * 0.56f
+                val haloPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    style = Paint.Style.FILL
+                    shader = RadialGradient(
+                        cx,
+                        cy,
+                        haloRadius,
+                        intArrayOf(
+                            SkyContrastScrimBottomLight.toArgb(),
+                            Transparent.toArgb()
+                        ),
+                        floatArrayOf(0f, 1f),
+                        Shader.TileMode.CLAMP
+                    )
+                }
+                canvas.drawCircle(cx, cy, haloRadius, haloPaint)
+            }
+            WeatherWidgetIconDrawer.drawIcon(
+                canvas = canvas,
+                effectType = effect,
+                cx = cx,
+                cy = cy,
+                sizePx = sizePx,
+                isPartlyCloudy = isPartlyCloudy,
+                isDaytime = hero.isDaytime
+            )
+        }
+
+        if (horizontal) {
+            val padX = (if (isTranslucent) SpacingTokens.Small else SpacingTokens.Medium).value * density
+            val padY = (if (isTranslucent) SpacingTokens.ExtraSmall else SpacingTokens.Small).value * density
+            val innerW = (w - padX * 2f).coerceAtLeast(w * 0.65f)
+            val innerH = (h - padY * 2f).coerceAtLeast(h * 0.65f)
+
+            val targetIconSize = (innerH * 0.92f).coerceIn(24f * density, 76f * density)
+            val targetTempPx = (innerH * 0.64f).coerceIn(18f * density, 54f * density)
+            val targetGap = (targetIconSize * 0.14f).coerceIn(
+                SpacingTokens.ExtraSmall.value * density,
+                SpacingTokens.Medium.value * density
+            )
+
+            tempPaint.textSize = targetTempPx
+            val rawTempW = tempPaint.measureText(tempText)
+            val rawTotalW = targetIconSize * 0.88f + targetGap + rawTempW
+            val fitScale = if (rawTotalW > innerW && rawTotalW > 0f) {
+                (innerW / rawTotalW).coerceIn(0.45f, 1f)
+            } else {
+                1f
+            }
+
+            val iconSize = targetIconSize * fitScale
+            val gap = targetGap * fitScale
+            tempPaint.textSize = targetTempPx * fitScale
+            val finalTempW = tempPaint.measureText(tempText)
+            val totalW = iconSize * 0.88f + gap + finalTempW
+
+            val startX = (w - totalW) * 0.5f
+            val iconCx = startX + iconSize * 0.44f
+            val iconCy = h * 0.5f
+            drawIconWithContrast(iconCx, iconCy, iconSize)
+
+            val bounds = Rect()
+            tempPaint.getTextBounds(tempText, 0, tempText.length, bounds)
+            val textBaselineY = if (bounds.height() > 0) {
+                h * 0.5f - (bounds.top + bounds.bottom) * 0.5f
+            } else {
+                h * 0.5f + tempPaint.textSize * 0.35f
+            }
+            val textX = startX + iconSize * 0.88f + gap
+            canvas.drawText(tempText, textX, textBaselineY, tempPaint)
+        } else {
+            val basePad = (if (isTranslucent) SpacingTokens.ExtraSmall else SpacingTokens.Small).value * density
+            val pad = minOf(basePad, minOf(w, h) * 0.12f)
+            val innerW = (w - pad * 2f).coerceAtLeast(w * 0.65f)
+            val innerH = (h - pad * 2f).coerceAtLeast(h * 0.65f)
+
+            val targetIconSize = minOf(innerW * 0.72f, innerH * 0.56f).coerceIn(18f * density, 76f * density)
+            val targetTempPx = minOf(innerH * 0.34f, innerW * 0.44f).coerceIn(13f * density, 46f * density)
+            tempPaint.textSize = targetTempPx
+            val measuredW = tempPaint.measureText(tempText)
+            val widthFitScale = if (measuredW > innerW && measuredW > 0f) {
+                (innerW / measuredW).coerceIn(0.5f, 1f)
+            } else {
+                1f
+            }
+            var iconSize = targetIconSize
+            tempPaint.textSize = targetTempPx * widthFitScale
+
+            val bounds = Rect()
+            tempPaint.getTextBounds(tempText, 0, tempText.length, bounds)
+            var digitH = bounds.height().takeIf { it > 0 }?.toFloat() ?: (tempPaint.textSize * 0.72f)
+            var iconVisualH = iconSize * 0.78f
+            var gap = (innerH * 0.06f).coerceIn(
+                SpacingTokens.Micro.value * density,
+                SpacingTokens.Small.value * density
+            )
+            val rawTotalH = iconVisualH + gap + digitH
+            if (rawTotalH > innerH && rawTotalH > 0f) {
+                val heightFitScale = (innerH / rawTotalH).coerceIn(0.5f, 1f)
+                iconSize *= heightFitScale
+                iconVisualH = iconSize * 0.78f
+                gap *= heightFitScale
+                tempPaint.textSize = tempPaint.textSize * heightFitScale
+                tempPaint.getTextBounds(tempText, 0, tempText.length, bounds)
+                digitH = bounds.height().takeIf { it > 0 }?.toFloat() ?: (tempPaint.textSize * 0.72f)
+            }
+            val totalH = iconVisualH + gap + digitH
+            val topY = (h - totalH) * 0.5f
+
+            val iconCx = w * 0.5f
+            val iconCy = topY + iconVisualH * 0.5f
+            drawIconWithContrast(iconCx, iconCy, iconSize)
+
+            val textBaselineY = if (bounds.height() > 0) {
+                topY + iconVisualH + gap - bounds.top
+            } else {
+                topY + iconVisualH + gap + digitH
+            }
+            val degreeOpticalShift = tempPaint.measureText("°") * 0.25f
+            canvas.drawText(tempText, w * 0.5f + degreeOpticalShift, textBaselineY, tempPaint)
+        }
     }
 
     /**

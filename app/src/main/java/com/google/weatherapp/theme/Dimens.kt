@@ -85,6 +85,7 @@ object ComponentTokens {
     val SkeletonIconSize: Dp = 76.dp
     val LocationSearchMaxHeight: Dp = 460.dp
     val DayDetailMicroBarHeight: Dp = 5.dp
+    val LockScreenPreviewMaxWidth: Dp = 220.dp
 }
 
 object EffectTokens {
