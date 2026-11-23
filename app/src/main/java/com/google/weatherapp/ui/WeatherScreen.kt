@@ -26,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.LocationCity
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.SystemUpdate
@@ -45,6 +46,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.weatherapp.data.map.WeatherMapLayer
 import com.google.weatherapp.data.model.DailyItem
 import com.google.weatherapp.data.model.HeroWeather
 import com.google.weatherapp.data.model.HourlyItem
@@ -53,11 +55,11 @@ import com.google.weatherapp.data.model.SkyThemeType
 import com.google.weatherapp.data.model.WeatherEffectType
 import com.google.weatherapp.theme.*
 import com.google.weatherapp.ui.components.*
+import com.google.weatherapp.ui.map.WeatherMapScreen
 import com.google.weatherapp.update.AppUpdateManager
 import com.google.weatherapp.update.UpdateCheckState
 import com.google.weatherapp.update.UpdateDownloadState
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import sh.calvin.reorderable.ReorderableItem
@@ -73,22 +75,22 @@ fun WeatherScreen(
     viewModel: WeatherViewModel,
     modifier: Modifier = Modifier
 ) {
-    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val pageStates by viewModel.pageStates.collectAsStateWithLifecycle()
-    val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+    val refreshingPages by viewModel.refreshingPages.collectAsStateWithLifecycle()
     val savedLocations by viewModel.savedLocations.collectAsStateWithLifecycle()
     val selectedCustomLocation by viewModel.selectedCustomLocation.collectAsStateWithLifecycle()
     val searchState by viewModel.searchState.collectAsStateWithLifecycle()
+    val navigationEvent by viewModel.navigationEvent.collectAsStateWithLifecycle()
 
     val pages = remember(savedLocations) {
         listOf<SavedLocation?>(null) + savedLocations
     }
-    val targetPageIndex = remember(selectedCustomLocation, savedLocations) {
+    val initialPageIndex = remember {
         viewModel.activePageIndex(selectedCustomLocation, savedLocations)
             .coerceIn(0, (pages.size - 1).coerceAtLeast(0))
     }
     val pagerState = rememberPagerState(
-        initialPage = targetPageIndex,
+        initialPage = initialPageIndex,
         pageCount = { pages.size }
     )
 
@@ -99,25 +101,74 @@ fun WeatherScreen(
     var showLocationPicker by remember { mutableStateOf(false) }
     var showNotificationSheet by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
+    var activeWeatherMapLayer by remember { mutableStateOf<WeatherMapLayer?>(null) }
 
     val coroutineScope = rememberCoroutineScope()
+    val latestPages by rememberUpdatedState(pages)
+    val latestNavigationEvent by rememberUpdatedState(navigationEvent)
+    var isProgrammaticScroll by remember { mutableStateOf(false) }
+    var handledNavigationSeq by remember { mutableLongStateOf(navigationEvent.seq) }
 
-    // Sync user horizontal swipes -> ViewModel active location
+    // Sync ONLY user-initiated horizontal swipes -> ViewModel active location.
+    // Structural savedLocations mutations (add/delete) adjust settledPage while isScrollInProgress == false
+    // and must never hijack selection or revert a newly added/deleted city.
     LaunchedEffect(pagerState) {
-        snapshotFlow { pagerState.settledPage }
-            .distinctUntilChanged()
-            .collect { settledPage ->
-                selectedDay = null
-                viewModel.onSwipeToPage(settledPage)
+        var sawUserScroll = false
+        snapshotFlow {
+            Triple(pagerState.settledPage, pagerState.isScrollInProgress, isProgrammaticScroll)
+        }.collect { (settledPage, scrolling, programmatic) ->
+            if (scrolling && !programmatic) {
+                sawUserScroll = true
+            } else if (!scrolling) {
+                if (sawUserScroll && !programmatic && latestNavigationEvent.seq == handledNavigationSeq) {
+                    sawUserScroll = false
+                    selectedDay = null
+                    viewModel.onSwipeToPage(settledPage)
+                } else if (programmatic) {
+                    sawUserScroll = false
+                }
             }
+        }
     }
 
-    // Sync picker / dot selection -> HorizontalPager smoothly
-    LaunchedEffect(targetPageIndex, pages.size) {
-        val safeTarget = targetPageIndex.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-        if (pagerState.currentPage != safeTarget) {
-            pagerState.animateScrollToPage(safeTarget)
+    // Sync ONLY explicit programmatic navigation (picker selection, active city removal, dot click).
+    // Never triggered by manual user swipes, so fast consecutive drags can never snap backwards.
+    LaunchedEffect(navigationEvent.seq) {
+        if (navigationEvent.seq == handledNavigationSeq) return@LaunchedEffect
+        isProgrammaticScroll = true
+        try {
+            val resolveTargetIndex = {
+                val curPages = latestPages
+                val matched = curPages.indexOfFirst {
+                    WeatherViewModel.pageKeyFor(it) == navigationEvent.targetKey
+                }
+                (if (matched >= 0) matched else 0).coerceIn(0, (curPages.size - 1).coerceAtLeast(0))
+            }
+            if (navigationEvent.snapImmediately) {
+                val immediateTarget = resolveTargetIndex()
+                pagerState.scrollToPage(immediateTarget)
+                withFrameNanos { }
+                val postMeasureTarget = resolveTargetIndex()
+                if (pagerState.currentPage != postMeasureTarget) {
+                    pagerState.scrollToPage(postMeasureTarget)
+                }
+            } else {
+                // Allow HorizontalPager measure/key-matching to finish before smoothly animating
+                withFrameNanos { }
+                val targetIndex = resolveTargetIndex()
+                if (!pagerState.isScrollInProgress && pagerState.currentPage != targetIndex) {
+                    pagerState.animateScrollToPage(targetIndex)
+                }
+            }
+        } finally {
+            handledNavigationSeq = navigationEvent.seq
+            isProgrammaticScroll = false
         }
+    }
+
+    // Keep adjacent neighbor pages warmed so swiping lands on real data instead of skeletons
+    LaunchedEffect(pagerState.settledPage, pages.size) {
+        viewModel.prefetchAdjacentPages(pagerState.settledPage)
     }
     val updateManager = remember { AppUpdateManager(context) }
     var updateCheckState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Idle) }
@@ -184,8 +235,14 @@ fun WeatherScreen(
     var activeEffectOverride by remember { mutableStateOf<WeatherEffectType?>(null) }
 
     val visiblePageLocation = pages.getOrNull(pagerState.currentPage)
-    val visiblePageKey = WeatherViewModel.pageKeyFor(visiblePageLocation)
-    val visibleUiState = pageStates[visiblePageKey] ?: uiState
+    val isPendingSnap = navigationEvent.seq != handledNavigationSeq && navigationEvent.snapImmediately
+    val visiblePageKey = if (isPendingSnap) {
+        navigationEvent.targetKey
+    } else {
+        WeatherViewModel.pageKeyFor(visiblePageLocation)
+    }
+    // Never fall back to a different city's uiState so uncached pages never leak prior sky or sheet data
+    val visibleUiState = pageStates[visiblePageKey] ?: WeatherUiState.Loading
 
     val defaultEffect = remember { getDefaultWeatherEffect() }
     val resolvedEffect = when (val state = visibleUiState) {
@@ -488,6 +545,27 @@ fun WeatherScreen(
                                             DropdownMenuItem(
                                                 text = {
                                                     Text(
+                                                        text = "Weather Map",
+                                                        style = MaterialTheme.typography.bodyMedium,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = SkyTextPrimary
+                                                    )
+                                                },
+                                                leadingIcon = {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Map,
+                                                        contentDescription = null,
+                                                        tint = PrimaryDark
+                                                    )
+                                                },
+                                                onClick = {
+                                                    showMenu = false
+                                                    activeWeatherMapLayer = WeatherMapLayer.WIND
+                                                }
+                                            )
+                                            DropdownMenuItem(
+                                                text = {
+                                                    Text(
                                                         text = "Locations",
                                                         style = MaterialTheme.typography.bodyMedium,
                                                         fontWeight = FontWeight.Medium,
@@ -568,11 +646,15 @@ fun WeatherScreen(
             ) { paddingValues ->
                 // Full-bleed edge-to-edge swipeable city pages gliding smoothly behind the floating glass header
                 Box(modifier = Modifier.fillMaxSize()) {
+                    val hideShiftedPageDuringSnap = isPendingSnap &&
+                        WeatherViewModel.pageKeyFor(visiblePageLocation) != navigationEvent.targetKey
                     HorizontalPager(
                         state = pagerState,
                         key = { index -> WeatherViewModel.pageKeyFor(pages.getOrNull(index)) },
                         beyondViewportPageCount = 1,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = if (hideShiftedPageDuringSnap) 0f else 1f }
                     ) { pageIndex ->
                         val pageLocation = pages.getOrNull(pageIndex)
                         val pageKey = WeatherViewModel.pageKeyFor(pageLocation)
@@ -591,14 +673,15 @@ fun WeatherScreen(
                         }
 
                         val pullToRefreshState = rememberPullToRefreshState()
+                        val isPageRefreshing = pageKey in refreshingPages
                         PullToRefreshBox(
-                            isRefreshing = isRefreshing && isCurrentPage,
-                            onRefresh = { viewModel.refresh() },
+                            isRefreshing = isPageRefreshing && isCurrentPage,
+                            onRefresh = { viewModel.refreshPage(pageLocation) },
                             state = pullToRefreshState,
                             indicator = {
                                 PullToRefreshDefaults.Indicator(
                                     state = pullToRefreshState,
-                                    isRefreshing = isRefreshing && isCurrentPage,
+                                    isRefreshing = isPageRefreshing && isCurrentPage,
                                     modifier = Modifier
                                         .align(Alignment.TopCenter)
                                         .padding(top = paddingValues.calculateTopPadding())
@@ -719,15 +802,15 @@ fun WeatherScreen(
                                                         pageCount = pages.size,
                                                         activePageIndex = pageIndex,
                                                         onSelectPageIndex = { idx ->
-                                                            coroutineScope.launch {
-                                                                pagerState.animateScrollToPage(idx)
-                                                            }
+                                                            selectedDay = null
+                                                            viewModel.selectPageIndex(idx)
                                                         },
                                                         onLocationClick = { showLocationPicker = true },
                                                         modifier = widgetModifier
                                                     )
                                                     DashboardSection.ALERT -> SevereWeatherAlertPill(
                                                         alert = data.alert,
+                                                        onOpenStormMap = { activeWeatherMapLayer = WeatherMapLayer.STORMS },
                                                         modifier = widgetModifier
                                                     )
                                                     DashboardSection.HOURLY -> HourlyForecastStrip(
@@ -744,6 +827,7 @@ fun WeatherScreen(
                                                         telemetry = data.telemetry,
                                                         hourlyList = data.hourlyList,
                                                         isDaytime = data.hero.isDaytime,
+                                                        onOpenWeatherMap = { layer -> activeWeatherMapLayer = layer },
                                                         modifier = widgetModifier
                                                     )
                                                 }
@@ -817,6 +901,7 @@ fun WeatherScreen(
                             searchState = searchState,
                             onSearchQueryChanged = { viewModel.searchCities(it) },
                             onSelectLocation = { loc ->
+                                selectedDay = null
                                 viewModel.selectLocation(loc)
                                 showLocationPicker = false
                             },
@@ -879,6 +964,61 @@ fun WeatherScreen(
                                 downloadedApkFile?.let { updateManager.installApk(it) }
                             }
                         )
+                    }
+                }
+            }
+
+            // Full-screen Windy-inspired Weather Map destination (completely outside HorizontalPager)
+            val mapLayerToOpen = activeWeatherMapLayer
+            if (mapLayerToOpen != null) {
+                val activeSuccessData = (visibleUiState as? WeatherUiState.Success)?.data
+                val gpsSuccessData = (pageStates[WeatherViewModel.PAGE_KEY_GPS] as? WeatherUiState.Success)?.data
+                val resolvedLat = activeSuccessData?.latitude
+                    ?: visiblePageLocation?.latitude
+                    ?: gpsSuccessData?.latitude
+                    ?: savedLocations.firstOrNull()?.latitude
+                val resolvedLon = activeSuccessData?.longitude
+                    ?: visiblePageLocation?.longitude
+                    ?: gpsSuccessData?.longitude
+                    ?: savedLocations.firstOrNull()?.longitude
+
+                if (resolvedLat != null && resolvedLon != null) {
+                    val resolvedName = activeSuccessData?.hero?.locationName
+                        ?: visiblePageLocation?.name
+                        ?: gpsSuccessData?.hero?.locationName
+                        ?: savedLocations.firstOrNull()?.name
+                        ?: "Current Location"
+                    val resolvedTz = activeSuccessData?.timezone ?: visiblePageLocation?.timezone
+                    val gpsSavedLocation = if (gpsSuccessData?.latitude != null && gpsSuccessData.longitude != null) {
+                        SavedLocation(
+                            name = gpsSuccessData.hero.locationName,
+                            latitude = gpsSuccessData.latitude,
+                            longitude = gpsSuccessData.longitude,
+                            isCurrentGps = true,
+                            timezone = gpsSuccessData.timezone
+                        )
+                    } else null
+
+                    WeatherMapScreen(
+                        initialLatitude = resolvedLat,
+                        initialLongitude = resolvedLon,
+                        initialPlaceName = resolvedName,
+                        initialTimezone = resolvedTz,
+                        initialLayer = mapLayerToOpen,
+                        gpsLocation = gpsSavedLocation,
+                        savedLocations = savedLocations,
+                        activeAlert = activeSuccessData?.alert,
+                        onBack = { activeWeatherMapLayer = null },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    LaunchedEffect(mapLayerToOpen) {
+                        Toast.makeText(
+                            context,
+                            "Waiting for location coordinates before opening Weather Map.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        activeWeatherMapLayer = null
                     }
                 }
             }

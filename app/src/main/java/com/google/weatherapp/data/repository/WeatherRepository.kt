@@ -19,6 +19,7 @@ class WeatherRepository(
     private val photonGeocodingService: PhotonGeocodingService = ApiClient.photonGeocodingService,
     private val sawsAlertClient: SawsAlertClient = SawsAlertClient(),
     private val globalOfficialAlertClient: GlobalOfficialAlertClient = GlobalOfficialAlertClient(),
+    private val eumetsatLiveStormClient: EumetsatLiveStormClient = EumetsatLiveStormClient(),
     private val apiKey: String = BuildConfig.GOOGLE_WEATHER_API_KEY,
     private val localDataSource: WeatherLocalDataSource? = null
 ) {
@@ -44,6 +45,31 @@ class WeatherRepository(
         gpsLatitude = gpsLatitude,
         gpsLongitude = gpsLongitude
     )
+
+    fun getAllCachedWeatherEntries(): Map<String, WeatherDashboardData> =
+        localDataSource?.getAllCachedWeatherEntries() ?: emptyMap()
+
+    fun locationCacheKeyFor(
+        location: SavedLocation?,
+        gpsLatitude: Double? = null,
+        gpsLongitude: Double? = null
+    ): String? = localDataSource?.locationKeyFor(
+        location = location,
+        gpsLatitude = gpsLatitude,
+        gpsLongitude = gpsLongitude
+    )
+
+    fun syncActiveWidgetCache(
+        data: WeatherDashboardData,
+        targetLocation: SavedLocation?,
+        shouldUpdate: () -> Boolean = { true }
+    ) {
+        localDataSource?.updateActiveCacheSlot(
+            data = data,
+            targetLocation = targetLocation,
+            shouldUpdate = shouldUpdate
+        )
+    }
 
     fun getSavedLocations(): List<SavedLocation> = localDataSource?.getSavedLocations() ?: emptyList()
 
@@ -165,7 +191,8 @@ class WeatherRepository(
         altitude: Double? = null,
         fallbackTimezone: String? = null,
         targetLocation: SavedLocation? = localDataSource?.getSelectedCustomLocation(),
-        updateActiveCacheSlot: Boolean = true
+        updateActiveCacheSlot: Boolean = true,
+        shouldUpdateActiveCacheSlot: () -> Boolean = { updateActiveCacheSlot }
     ): WeatherDashboardData = withContext(Dispatchers.IO) {
         try {
             coroutineScope {
@@ -267,6 +294,14 @@ class WeatherRepository(
                         )
                     } ?: emptyList()
                 }
+                val liveSatelliteDeferred = async {
+                    safeCall("EUMETSAT live satellite storm check") {
+                        eumetsatLiveStormClient.fetchLiveObservation(
+                            latitude = latitude,
+                            longitude = longitude
+                        )
+                    }
+                }
 
                 val gCurrent = googleCurrentDeferred.await()
                 val gHourly = googleHourlyDeferred.await()
@@ -277,6 +312,7 @@ class WeatherRepository(
                 val omForecast = openMeteoDeferred.await()
                 val omConsensus = consensusDeferred.await()
                 val omAqi = airQualityDeferred.await()
+                val liveSatellite = liveSatelliteDeferred.await()
 
                 val hasUsableGoogle = gCurrent?.temperature?.degrees != null &&
                     !gDaily?.forecastDays.isNullOrEmpty()
@@ -297,7 +333,8 @@ class WeatherRepository(
                         googleAlerts = gAlerts,
                         sawsAlerts = sawsAlerts,
                         globalOfficialAlerts = globalOfficialAlerts,
-                        fallbackTimezone = fallbackTimezone
+                        fallbackTimezone = fallbackTimezone,
+                        liveSatellite = liveSatellite
                     )
                     hasUsableOpenMeteo -> WeatherMapper.mapOpenMeteoFallbackDashboardData(
                         omForecast = omForecast!!,
@@ -309,7 +346,8 @@ class WeatherRepository(
                         googleAlerts = gAlerts,
                         sawsAlerts = sawsAlerts,
                         globalOfficialAlerts = globalOfficialAlerts,
-                        fallbackTimezone = fallbackTimezone
+                        fallbackTimezone = fallbackTimezone,
+                        liveSatellite = liveSatellite
                     )
                     else -> throw IllegalStateException("Weather sources unavailable for this location")
                 }
@@ -317,7 +355,7 @@ class WeatherRepository(
                 localDataSource?.saveWeather(
                     data = result,
                     targetLocation = targetLocation,
-                    updateActiveSlot = updateActiveCacheSlot
+                    shouldUpdateActiveSlot = shouldUpdateActiveCacheSlot
                 )
                 result
             }

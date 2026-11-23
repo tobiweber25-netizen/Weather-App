@@ -13,11 +13,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Compress
 import androidx.compose.material.icons.filled.Eco
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Opacity
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.WaterDrop
@@ -43,6 +45,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import com.google.weatherapp.data.map.WeatherMapLayer
 import com.google.weatherapp.data.model.BentoTelemetry
 import com.google.weatherapp.data.model.HourlyItem
 import com.google.weatherapp.theme.*
@@ -60,6 +63,7 @@ fun BentoTelemetryGrid(
     telemetry: BentoTelemetry,
     hourlyList: List<HourlyItem> = emptyList(),
     isDaytime: Boolean = true,
+    onOpenWeatherMap: ((WeatherMapLayer) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isSevereWind = telemetry.windGustKmH > 40
@@ -166,7 +170,9 @@ fun BentoTelemetryGrid(
                 unitSuffix = " km/h",
                 data = windData,
                 timeLabels = timeAxisLabels,
-                accentColor = SunCoreGold
+                accentColor = SunCoreGold,
+                actionLabel = if (onOpenWeatherMap != null) "View Live Wind Map" else null,
+                onActionClick = onOpenWeatherMap?.let { cb -> { cb(WeatherMapLayer.WIND) } }
             )
         }
 
@@ -246,7 +252,9 @@ fun BentoTelemetryGrid(
                 unitSuffix = if (isUv) "" else " mm",
                 data = chartData,
                 timeLabels = timeAxisLabels,
-                accentColor = if (isUv) UvHighOrange else RainDropCyan
+                accentColor = if (isUv) UvHighOrange else RainDropCyan,
+                actionLabel = if (!isUv && onOpenWeatherMap != null) "View Live Storm & Rain Map" else null,
+                onActionClick = if (!isUv) onOpenWeatherMap?.let { cb -> { cb(WeatherMapLayer.STORMS) } } else null
             )
         }
 
@@ -653,7 +661,9 @@ private fun ExpandedSparklineGlassCard(
     unitSuffix: String,
     data: List<Float>,
     timeLabels: List<String>,
-    accentColor: Color
+    accentColor: Color,
+    actionLabel: String? = null,
+    onActionClick: (() -> Unit)? = null
 ) {
     val maxVal = data.maxOrNull() ?: 0f
     val minVal = data.minOrNull() ?: 0f
@@ -714,6 +724,38 @@ private fun ExpandedSparklineGlassCard(
                         color = SkyTextMuted
                     )
                 }
+            }
+        }
+
+        if (!actionLabel.isNullOrBlank() && onActionClick != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
+                modifier = Modifier
+                    .padding(top = SpacingTokens.ExtraSmall)
+                    .clip(RoundedCornerShape(CornerTokens.Pill))
+                    .background(GlassPillHighlight)
+                    .clickable(onClick = onActionClick)
+                    .padding(horizontal = SpacingTokens.Medium, vertical = SpacingTokens.Small)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Map,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(IconSizeTokens.Micro)
+                )
+                Text(
+                    text = actionLabel,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = SkyTextPrimary
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = null,
+                    tint = SkyTextSecondary,
+                    modifier = Modifier.size(IconSizeTokens.Micro)
+                )
             }
         }
     }

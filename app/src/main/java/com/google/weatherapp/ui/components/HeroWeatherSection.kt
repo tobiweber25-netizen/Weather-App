@@ -4,7 +4,9 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -72,7 +74,7 @@ fun HeroWeatherSection(
             value = null
             return@produceState
         }
-        val formatter = DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
+        val formatter = DateTimeFormatter.ofPattern("HH:mm", Locale.US)
         while (true) {
             val now = Instant.now()
             val locationOffset = zone.rules.getOffset(now)
@@ -159,43 +161,69 @@ fun HeroWeatherSection(
             }
 
             // Subtle swipe page indicator dots (Page 0 = GPS arrow, Pages 1..N = saved places)
+            // Uses comfortable touch target Boxes and horizontalScroll so large saved-city lists stay bounded.
             if (pageCount > 1) {
-                Spacer(modifier = Modifier.height(SpacingTokens.Small))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
+                Spacer(modifier = Modifier.height(SpacingTokens.ExtraSmall))
+                val indicatorScrollState = rememberScrollState()
+                LaunchedEffect(activePageIndex, pageCount, indicatorScrollState.maxValue) {
+                    if (indicatorScrollState.maxValue > 0) {
+                        val target = ((activePageIndex.toFloat() / (pageCount - 1).coerceAtLeast(1)) *
+                            indicatorScrollState.maxValue).toInt()
+                        indicatorScrollState.animateScrollTo(target)
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = SpacingTokens.Base),
+                    contentAlignment = Alignment.Center
                 ) {
-                    for (idx in 0 until pageCount) {
-                        val isActive = idx == activePageIndex
-                        if (idx == 0) {
-                            Icon(
-                                imageVector = Icons.Default.MyLocation,
-                                contentDescription = "Current Location page",
-                                tint = if (isActive) SunCoreGold else SkyTextMuted.copy(alpha = 0.55f),
-                                modifier = Modifier
-                                    .size(ComponentTokens.PageIndicatorGpsIconSize)
-                                    .then(
-                                        if (onSelectPageIndex != null) Modifier.clickable { onSelectPageIndex(0) }
-                                        else Modifier
-                                    )
-                            )
-                        } else {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.None),
+                        modifier = Modifier.horizontalScroll(indicatorScrollState)
+                    ) {
+                        for (idx in 0 until pageCount) {
+                            val isActive = idx == activePageIndex
                             Box(
+                                contentAlignment = Alignment.Center,
                                 modifier = Modifier
-                                    .width(
-                                        if (isActive) ComponentTokens.PageIndicatorActiveWidth
-                                        else ComponentTokens.PageIndicatorDotSize
+                                    .defaultMinSize(
+                                        minWidth = ComponentTokens.PageIndicatorTouchWidth,
+                                        minHeight = ComponentTokens.PageIndicatorTouchHeight
                                     )
-                                    .height(ComponentTokens.PageIndicatorDotSize)
-                                    .clip(CircleShape)
-                                    .background(
-                                        if (isActive) SkyTextPrimary else SkyTextMuted.copy(alpha = 0.45f)
-                                    )
+                                    .clip(RoundedCornerShape(CornerTokens.Pill))
                                     .then(
                                         if (onSelectPageIndex != null) Modifier.clickable { onSelectPageIndex(idx) }
                                         else Modifier
                                     )
-                            )
+                                    .padding(
+                                        horizontal = SpacingTokens.ExtraSmall,
+                                        vertical = SpacingTokens.Small
+                                    )
+                            ) {
+                                if (idx == 0) {
+                                    Icon(
+                                        imageVector = Icons.Default.MyLocation,
+                                        contentDescription = "Current Location page",
+                                        tint = if (isActive) SunCoreGold else SkyTextMuted.copy(alpha = 0.55f),
+                                        modifier = Modifier.size(ComponentTokens.PageIndicatorGpsIconSize)
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .width(
+                                                if (isActive) ComponentTokens.PageIndicatorActiveWidth
+                                                else ComponentTokens.PageIndicatorDotSize
+                                            )
+                                            .height(ComponentTokens.PageIndicatorDotSize)
+                                            .clip(CircleShape)
+                                            .background(
+                                                if (isActive) SkyTextPrimary else SkyTextMuted.copy(alpha = 0.45f)
+                                            )
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -442,11 +470,36 @@ private fun UnifiedPrecipitationNowcastCard(
     }
     val peakHour = upcomingHours.getOrNull(peakIndex)
 
-    val precipWord = (nowcast?.precipitationLabel ?: "Rain").lowercase()
+    val inferredPrecipLabel = remember(nowcast?.precipitationLabel, upcomingHours) {
+        nowcast?.precipitationLabel?.takeIf { it.isNotBlank() } ?: run {
+            val wetHours = upcomingHours.filter { it.rainProbability >= 25 || it.precipitationMm > 0.0 }
+                .ifEmpty { upcomingHours }
+            val snowLike = wetHours.any { h ->
+                val c = h.conditionText.lowercase(Locale.US)
+                c.contains("snow") || c.contains("blizzard") || c.contains("flurr") || c.contains("sleet") ||
+                    ((h.precipitationMm >= 0.1 || h.rainProbability >= 45) && h.tempDegrees <= 0)
+            }
+            val iceLike = !snowLike && wetHours.any { h ->
+                val c = h.conditionText.lowercase(Locale.US)
+                c.contains("freezing") || c.contains("ice")
+            }
+            when {
+                snowLike -> "Snow"
+                iceLike -> "Freezing rain"
+                else -> "Rain"
+            }
+        }
+    }
+    val precipWord = inferredPrecipLabel.lowercase(Locale.US)
+    val badgeNoun = when (precipWord) {
+        "snow" -> "SNOW"
+        "freezing rain", "ice" -> "ICE"
+        else -> "RAIN"
+    }
     val badgeLabel = when {
         nowcast != null && nowcast.headlineLabel.isNotBlank() -> nowcast.headlineLabel
-        nowcast != null && nowcast.isHighRes15Min -> "15-MIN RAIN NOWCAST"
-        else -> "SHORT-TERM ${precipWord.uppercase()} FORECAST"
+        nowcast != null && nowcast.isHighRes15Min -> "15-MIN $badgeNoun NOWCAST"
+        else -> "SHORT-TERM $badgeNoun FORECAST"
     }
     val summaryLabel = when {
         nowcast != null && nowcast.summaryText.isNotBlank() -> nowcast.summaryText

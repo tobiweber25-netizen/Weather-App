@@ -30,7 +30,7 @@ object WeatherWidgetUpdater {
     )
 
     fun resolveWidgetKind(context: Context, appWidgetId: Int): WidgetKind {
-        val manager = AppWidgetManager.getInstance(context)
+        val manager = AppWidgetManager.getInstance(context) ?: return WidgetKind.TODAY_COMPACT
         val providerClass = manager.getAppWidgetInfo(appWidgetId)?.provider?.className
         return providerMap.firstOrNull { it.first.name == providerClass }?.second
             ?: WidgetKind.TODAY_COMPACT
@@ -38,8 +38,8 @@ object WeatherWidgetUpdater {
 
     fun updateAllWidgets(context: Context, preloadedData: WeatherDashboardData? = null) {
         val appContext = context.applicationContext
-        val manager = AppWidgetManager.getInstance(appContext)
-        val data = preloadedData ?: WeatherLocalDataSource(appContext).getLatestCachedWeatherIgnoringTtl()
+        val manager = AppWidgetManager.getInstance(appContext) ?: return
+        val data = preloadedData ?: WeatherLocalDataSource(appContext).getLatestCachedWeatherForActiveLocation()
 
         providerMap.forEach { (cls, kind) ->
             val ids = manager.getAppWidgetIds(ComponentName(appContext, cls))
@@ -76,7 +76,7 @@ object WeatherWidgetUpdater {
             appWidgetId = appWidgetId,
             defaultStyle = kind.defaultBackgroundStyle
         )
-        val data = preloadedData ?: WeatherLocalDataSource(appContext).getLatestCachedWeatherIgnoringTtl()
+        val data = preloadedData ?: WeatherLocalDataSource(appContext).getLatestCachedWeatherForActiveLocation()
 
         val bitmap = WeatherWidgetRenderer.renderWidgetBitmap(
             context = appContext,
@@ -110,14 +110,39 @@ object WeatherWidgetUpdater {
         appWidgetManager.updateAppWidget(appWidgetId, views)
     }
 
+    internal fun lookupFreshCachedWeatherForWidget(
+        localSource: WeatherLocalDataSource,
+        cachedGpsCoords: com.google.weatherapp.location.Coordinates?
+    ): WeatherDashboardData? {
+        val customLoc = localSource.getSelectedCustomLocation()
+        return if (customLoc != null && !customLoc.isCurrentGps) {
+            localSource.getCachedWeatherForLocation(location = customLoc)
+        } else {
+            localSource.getCachedWeatherForLocation(
+                location = null,
+                gpsLatitude = cachedGpsCoords?.latitude,
+                gpsLongitude = cachedGpsCoords?.longitude
+            ) ?: localSource.getDeviceWeather(maxAgeMs = 30 * 60 * 1000L)
+                ?.let { localSource.validateFreshForLocalDate(it) }
+                ?: localSource.getCachedWeather()
+        }
+    }
+
     suspend fun fetchFreshWeatherIfNeeded(context: Context): WeatherDashboardData? {
         val appContext = context.applicationContext
         val localSource = WeatherLocalDataSource(appContext)
-        val freshCached = localSource.getCachedWeather()
-        if (freshCached != null) return freshCached
+        val locationClient = LocationClient(appContext)
+        val freshCached = lookupFreshCachedWeatherForWidget(
+            localSource = localSource,
+            cachedGpsCoords = locationClient.getCachedCoordinates()
+        )
+        val customLoc = localSource.getSelectedCustomLocation()
+        if (freshCached != null) {
+            localSource.updateActiveCacheSlot(data = freshCached, targetLocation = customLoc)
+            return freshCached
+        }
 
         val repo = WeatherRepository(localDataSource = localSource)
-        val customLoc = repo.getSelectedCustomLocation()
         return try {
             if (customLoc != null && !customLoc.isCurrentGps) {
                 repo.getWeatherData(
@@ -128,7 +153,7 @@ object WeatherWidgetUpdater {
                     targetLocation = customLoc
                 )
             } else {
-                val coords = LocationClient(appContext).fetchLocation(forceFresh = false)
+                val coords = locationClient.fetchLocation(forceFresh = false)
                 if (coords != null) {
                     repo.getWeatherData(
                         latitude = coords.latitude,
@@ -139,11 +164,13 @@ object WeatherWidgetUpdater {
                     )
                 } else {
                     // Never substitute a different saved city when GPS is unavailable.
-                    localSource.getDeviceWeather() ?: localSource.getLatestCachedWeatherIgnoringTtl()
+                    localSource.getDeviceWeather()?.also {
+                        localSource.updateActiveCacheSlot(data = it, targetLocation = null)
+                    }
                 }
             }
         } catch (_: Exception) {
-            localSource.getLatestCachedWeatherIgnoringTtl()
+            localSource.getLatestCachedWeatherForActiveLocation()
         }
     }
 }
@@ -157,7 +184,7 @@ abstract class BaseWeatherWidgetProvider(
         appWidgetManager: AppWidgetManager,
         appWidgetIds: IntArray
     ) {
-        val cached = WeatherLocalDataSource(context).getLatestCachedWeatherIgnoringTtl()
+        val cached = WeatherLocalDataSource(context).getLatestCachedWeatherForActiveLocation()
         appWidgetIds.forEach { id ->
             WeatherWidgetUpdater.updateSingleWidget(
                 context = context,

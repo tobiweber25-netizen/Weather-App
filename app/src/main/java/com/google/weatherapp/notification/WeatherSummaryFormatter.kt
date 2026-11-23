@@ -111,7 +111,9 @@ object WeatherSummaryFormatter {
         val rawDayCondition = tomorrow.dayConditionText.ifBlank { tomorrow.conditionText }
         val conditionPhrase = formatCondition(
             rawCondition = rawDayCondition,
-            rainProbability = tomorrow.rainProbability
+            rainProbability = tomorrow.rainProbability,
+            precipType = tomorrow.precipitationType,
+            maxTempC = tomorrow.maxTemp
         )
 
         val conciseText = "$tempComparison with $conditionPhrase (${tomorrow.maxTemp}° / ${tomorrow.minTemp}°)."
@@ -130,7 +132,12 @@ object WeatherSummaryFormatter {
             append(tomorrow.minTemp)
             append("°")
             if (tomorrow.rainProbability > 0) {
-                append(" • Rain: ")
+                val precipTerm = precipLabelFor(
+                    tomorrow.precipitationType,
+                    rawDayCondition,
+                    tomorrow.maxTemp
+                )
+                append(" • $precipTerm: ")
                 append(tomorrow.rainProbability)
                 append("%")
             }
@@ -180,28 +187,34 @@ object WeatherSummaryFormatter {
             upcomingHours
         }
 
-        // Only call out hourly rain when probability or volume is meaningful (avoid false alarms on 0.2mm trace at 20% PoP)
+        // Only call out hourly precip when probability or volume is meaningful (avoid false alarms on 0.2mm trace at 20% PoP)
         val firstRainIdx = futureHours.indexOfFirst { isMeaningfulRainHour(it) }
+        val rawTodayCond = today.dayConditionText.ifBlank { today.conditionText }
         val conciseText = if (firstRainIdx >= 0) {
             val rainRun = futureHours.drop(firstRainIdx).takeWhile { isMeaningfulRainHour(it) }
             val firstRainHour = rainRun.first()
             val lastRainHour = rainRun.last()
+            val runPrecipWord = resolveRunPrecipNoun(rainRun, today.precipitationType, rawTodayCond)
             when {
                 firstRainHour.hourLabel.trim().equals("Now", ignoreCase = true) ->
-                    "High of ${today.maxTemp}° with rain right now."
+                    "High of ${today.maxTemp}° with $runPrecipWord right now."
                 rainRun.size >= 2 && !lastRainHour.hourLabel.trim().equals("Now", ignoreCase = true) -> {
                     val startText = formatClockLabel(firstRainHour.hourLabel)
                     val endText = formatClockLabel(lastRainHour.hourLabel)
-                    "High of ${today.maxTemp}° with rain likely from $startText to $endText."
+                    "High of ${today.maxTemp}° with $runPrecipWord likely from $startText to $endText."
                 }
                 else -> {
                     val timingPhrase = formatHourLabelForProse(firstRainHour.hourLabel)
-                    "High of ${today.maxTemp}° with rain likely $timingPhrase."
+                    "High of ${today.maxTemp}° with $runPrecipWord likely $timingPhrase."
                 }
             }
         } else {
-            val rawCond = today.dayConditionText.ifBlank { today.conditionText }
-            val cond = formatCondition(rawCond, today.rainProbability)
+            val cond = formatCondition(
+                rawCondition = rawTodayCond,
+                rainProbability = today.rainProbability,
+                precipType = today.precipitationType,
+                maxTempC = today.maxTemp
+            )
             "High of ${today.maxTemp}° today with $cond."
         }
 
@@ -213,7 +226,8 @@ object WeatherSummaryFormatter {
             append(today.minTemp)
             append("°")
             if (today.rainProbability > 0) {
-                append(" • Rain: ")
+                val precipTerm = precipLabelFor(today.precipitationType, rawTodayCond, today.maxTemp)
+                append(" • $precipTerm: ")
                 append(today.rainProbability)
                 append("%")
             }
@@ -245,10 +259,16 @@ object WeatherSummaryFormatter {
         nowcast: PrecipitationNowcast,
         locationName: String? = null
     ): RainNowcastSummary {
+        val kind = resolveNowcastPrecipKind(nowcast)
+        val alertBaseTitle = when (kind) {
+            PrecipKind.SNOW -> "Snow alert"
+            PrecipKind.ICE -> "Ice alert"
+            PrecipKind.RAIN -> "Rain alert"
+        }
         val title = if (!locationName.isNullOrBlank()) {
-            "Rain alert • $locationName"
+            "$alertBaseTitle • $locationName"
         } else {
-            "Rain alert"
+            alertBaseTitle
         }
 
         val effectiveRate = if (nowcast.nextPrecipitationOnsetMinutes != null && nowcast.onsetRateMmH > 0.0) {
@@ -256,21 +276,36 @@ object WeatherSummaryFormatter {
         } else {
             nowcast.maxRateMmH
         }
+        val precipNoun = when (kind) {
+            PrecipKind.SNOW -> "snow"
+            PrecipKind.ICE -> "freezing rain"
+            PrecipKind.RAIN -> "rain"
+        }
         val intensityLabel = when {
-            effectiveRate >= 4.0 -> "Heavy rain"
-            effectiveRate >= 1.0 -> "Moderate rain"
-            else -> "Light rain"
+            effectiveRate >= 4.0 -> "Heavy $precipNoun"
+            effectiveRate >= 1.0 -> "Moderate $precipNoun"
+            else -> "Light $precipNoun"
         }
         val rateClause = if (effectiveRate >= 0.1) " (~$effectiveRate mm/h)" else ""
+        val actionAdvice = when (kind) {
+            PrecipKind.SNOW -> "dress warmly and allow extra travel time."
+            PrecipKind.ICE -> "watch for slippery roads."
+            PrecipKind.RAIN -> "grab an umbrella."
+        }
+        val durationAdvice = when (kind) {
+            PrecipKind.SNOW -> "plan for snowy roads."
+            PrecipKind.ICE -> "use caution on icy surfaces."
+            PrecipKind.RAIN -> "keep an umbrella handy."
+        }
 
         val onset = nowcast.nextPrecipitationOnsetMinutes
         val conciseText = when {
             !nowcast.isHighRes15Min ->
-                nowcast.summaryText.trim().removeSuffix(".") + " — grab an umbrella."
+                nowcast.summaryText.trim().removeSuffix(".") + " — $actionAdvice"
             onset != null && onset <= 5 ->
-                "$intensityLabel starting right now$rateClause — grab an umbrella."
+                "$intensityLabel starting right now$rateClause — $actionAdvice"
             onset != null ->
-                "$intensityLabel starting in ~$onset min$rateClause — grab an umbrella."
+                "$intensityLabel starting in ~$onset min$rateClause — $actionAdvice"
             else ->
                 nowcast.summaryText
         }
@@ -278,11 +313,15 @@ object WeatherSummaryFormatter {
         val activeIntervals = nowcast.intervals.count { it.precipMm >= 0.1 }
         val durationGuidance = when {
             !nowcast.isHighRes15Min && activeIntervals > 0 ->
-                "Expected across the next ~$activeIntervals hour${if (activeIntervals == 1) "" else "s"} — keep an umbrella handy."
+                "Expected across the next ~$activeIntervals hour${if (activeIntervals == 1) "" else "s"} — $durationAdvice"
             activeIntervals > 0 ->
-                "Expected across the next ~${activeIntervals * 15} min — keep an umbrella handy."
+                "Expected across the next ~${activeIntervals * 15} min — $durationAdvice"
+            kind == PrecipKind.SNOW ->
+                "Snowy conditions arriving shortly — $durationAdvice"
+            kind == PrecipKind.ICE ->
+                "Icy conditions arriving shortly — $durationAdvice"
             else ->
-                "Wet conditions arriving shortly — keep an umbrella handy."
+                "Wet conditions arriving shortly — $durationAdvice"
         }
         val leadSentence = when {
             !nowcast.isHighRes15Min ->
@@ -312,16 +351,61 @@ object WeatherSummaryFormatter {
         }
 
         val cleanHeadline = normalizeAlertHeadline(alert.title)
+        val cleanSubtitle = alert.subtitle.trim().removeSuffix(".")
+        val isOfficialHeadline = alert.officialAlerts.isNotEmpty() &&
+            !alert.sourceLabel.isNullOrBlank() &&
+            alert.sourceLabel != alert.liveSatellite?.sourceLabel
+        val isThunderstormHeadline = cleanHeadline.contains("thunder", ignoreCase = true)
+
+        if (isOfficialHeadline && !isThunderstormHeadline) {
+            val topOfficial = alert.officialAlerts.first()
+            val detailBody = cleanSubtitle.ifBlank {
+                listOfNotNull(
+                    topOfficial.areaName.takeIf { it.isNotBlank() }?.let { "Area: $it" },
+                    topOfficial.expiresLabel.takeIf { it.isNotBlank() }?.let { "Active until $it" }
+                ).joinToString(". ").ifBlank { "Issued by ${alert.sourceLabel}" }
+            }
+            val conciseText = "$cleanHeadline: $detailBody."
+            val expandedDetails = buildString {
+                append("$cleanHeadline: $detailBody.")
+                append("\nSource: ${alert.sourceLabel}")
+                if (topOfficial.instruction.isNotBlank()) {
+                    append("\n${topOfficial.instruction.trim()}")
+                }
+            }
+            return SevereStormSummary(
+                title = title,
+                conciseText = conciseText,
+                expandedDetails = expandedDetails
+            )
+        }
+
         val hasTypeSuffix = cleanHeadline.endsWith("Watch", ignoreCase = true) ||
             cleanHeadline.endsWith("Warning", ignoreCase = true) ||
             cleanHeadline.endsWith("Alert", ignoreCase = true) ||
             cleanHeadline.endsWith("Risk", ignoreCase = true)
         val prefix = if (hasTypeSuffix) cleanHeadline else "$cleanHeadline watch"
         val peakLabel = alert.peakHourLabel?.trim()
+        val liveSatSummary = alert.liveSatellite
+            ?.takeIf { it.hasActiveStormOrLightning }
+            ?.formatCompactSummary()
 
+        val topOfficial = alert.officialAlerts.firstOrNull()
+        val fallbackOfficialBody = cleanSubtitle.ifBlank {
+            listOfNotNull(
+                topOfficial?.areaName?.takeIf { it.isNotBlank() }?.let { "Area: $it" },
+                topOfficial?.expiresLabel?.takeIf { it.isNotBlank() }?.let { "Active until $it" }
+            ).joinToString(". ").ifBlank {
+                alert.sourceLabel?.takeIf { it.isNotBlank() }?.let { "Issued by $it" }.orEmpty()
+            }
+        }
         val conciseText = when {
+            !liveSatSummary.isNullOrBlank() ->
+                "$cleanHeadline: $liveSatSummary (${alert.liveSatellite.sourceLabel})."
+            isOfficialHeadline ->
+                if (fallbackOfficialBody.isNotBlank()) "$cleanHeadline: $fallbackOfficialBody." else "$cleanHeadline."
             peakLabel.isNullOrBlank() ->
-                "$cleanHeadline: ${alert.subtitle}"
+                if (cleanSubtitle.isNotBlank()) "$cleanHeadline: $cleanSubtitle." else "$cleanHeadline."
             peakLabel.equals("Now", ignoreCase = true) ->
                 "$cleanHeadline active right now (${alert.thunderstormProbability}% risk)."
             peakLabel.startsWith("Tomorrow", ignoreCase = true) -> {
@@ -332,10 +416,18 @@ object WeatherSummaryFormatter {
                 "$prefix peaking around $peakLabel (${alert.thunderstormProbability}% risk)."
         }
 
-        val cleanSubtitle = alert.subtitle.trim().removeSuffix(".")
         val expandedDetails = buildString {
-            append("$cleanHeadline: $cleanSubtitle.")
-            if (!alert.subtitle.contains("${alert.thunderstormProbability}%")) {
+            val leadBody = if (isOfficialHeadline) fallbackOfficialBody else cleanSubtitle
+            append(if (leadBody.isNotBlank()) "$cleanHeadline: $leadBody." else "$cleanHeadline.")
+            if (!liveSatSummary.isNullOrBlank()) {
+                append("\nLive Satellite: $liveSatSummary (${alert.liveSatellite?.sourceLabel ?: "Meteosat Live"})")
+            }
+            if (isOfficialHeadline) {
+                append("\nSource: ${alert.sourceLabel}")
+                topOfficial?.instruction?.takeIf { it.isNotBlank() }?.let {
+                    append("\n${it.trim()}")
+                }
+            } else if (!alert.subtitle.contains("${alert.thunderstormProbability}%")) {
                 append("\nThunderstorm probability: ${alert.thunderstormProbability}%")
             }
         }
@@ -499,11 +591,24 @@ object WeatherSummaryFormatter {
         locationName: String? = null
     ): RainCessationSummary {
         val minutes = nowcast.rainCessationMinutes ?: 15
-        val baseTitle = "Rain Clearing Soon"
+        val kind = resolveNowcastPrecipKind(nowcast)
+        val baseTitle = when (kind) {
+            PrecipKind.SNOW -> "Snow Clearing Soon"
+            PrecipKind.ICE -> "Ice Clearing Soon"
+            PrecipKind.RAIN -> "Rain Clearing Soon"
+        }
         val title = if (!locationName.isNullOrBlank()) "$baseTitle • $locationName" else baseTitle
 
-        val conciseText = "Rain stopping in ~$minutes min — skies drying out soon."
-        val expandedDetails = "Precipitation is clearing up. Expect rain to stop in approximately $minutes minutes with drier conditions ahead."
+        val conciseText = when (kind) {
+            PrecipKind.SNOW -> "Snow stopping in ~$minutes min — skies clearing soon."
+            PrecipKind.ICE -> "Freezing rain stopping in ~$minutes min — conditions easing soon."
+            PrecipKind.RAIN -> "Rain stopping in ~$minutes min — skies drying out soon."
+        }
+        val expandedDetails = when (kind) {
+            PrecipKind.SNOW -> "Precipitation is clearing up. Expect snow to stop in approximately $minutes minutes with calmer conditions ahead."
+            PrecipKind.ICE -> "Precipitation is clearing up. Expect freezing rain to stop in approximately $minutes minutes; watch for lingering ice."
+            PrecipKind.RAIN -> "Precipitation is clearing up. Expect rain to stop in approximately $minutes minutes with drier conditions ahead."
+        }
 
         return RainCessationSummary(
             title = title,
@@ -624,15 +729,71 @@ object WeatherSummaryFormatter {
         return trimmed
     }
 
-    private fun formatCondition(rawCondition: String, rainProbability: Int): String {
+    private enum class PrecipKind { RAIN, SNOW, ICE }
+
+    private fun resolveNowcastPrecipKind(nowcast: PrecipitationNowcast): PrecipKind {
+        val label = nowcast.precipitationLabel?.lowercase(Locale.US).orEmpty()
+        val headline = nowcast.headlineLabel.lowercase(Locale.US)
+        val summary = nowcast.summaryText.lowercase(Locale.US)
+        return when {
+            label.contains("snow") || headline.contains("snow") || summary.startsWith("snow") -> PrecipKind.SNOW
+            label.contains("freezing") || label.contains("ice") || headline.contains("ice") || summary.startsWith("freezing") -> PrecipKind.ICE
+            else -> PrecipKind.RAIN
+        }
+    }
+
+    private fun precipLabelFor(precipType: String?, conditionText: String, maxTempC: Int): String {
+        val upperType = precipType?.trim()?.uppercase(Locale.US).orEmpty()
+        val lowerCond = conditionText.lowercase(Locale.US)
+        return when {
+            upperType == "SNOW" || lowerCond.contains("snow") || lowerCond.contains("blizzard") || lowerCond.contains("flurr") -> "Snow"
+            upperType == "ICE" || lowerCond.contains("freezing") || lowerCond.contains("sleet") || lowerCond.contains("ice") -> "Ice"
+            maxTempC <= 0 && lowerCond.contains("precip") -> "Snow"
+            else -> "Rain"
+        }
+    }
+
+    private fun resolveRunPrecipNoun(
+        run: List<HourlyItem>,
+        dayPrecipType: String?,
+        dayConditionText: String
+    ): String {
+        val anySnow = run.any { h ->
+            val c = h.conditionText.lowercase(Locale.US)
+            c.contains("snow") || c.contains("blizzard") || c.contains("flurr") || c.contains("sleet") || h.tempDegrees <= 0
+        } || dayPrecipType.equals("SNOW", ignoreCase = true) ||
+            dayConditionText.contains("snow", ignoreCase = true)
+        if (anySnow) return "snow"
+
+        val anyIce = run.any { h ->
+            val c = h.conditionText.lowercase(Locale.US)
+            c.contains("freezing") || c.contains("ice")
+        } || dayPrecipType.equals("ICE", ignoreCase = true) ||
+            dayConditionText.contains("freezing", ignoreCase = true)
+        if (anyIce) return "freezing rain"
+
+        return "rain"
+    }
+
+    private fun formatCondition(
+        rawCondition: String,
+        rainProbability: Int,
+        precipType: String? = null,
+        maxTempC: Int? = null
+    ): String {
         val lower = rawCondition.lowercase(Locale.getDefault()).trim()
         return when {
             lower.contains("thunder") || lower.contains("storm") -> "thunderstorms"
+            lower.contains("freezing") || lower.contains("sleet") || lower.contains("ice") -> "freezing rain"
             lower.contains("snow") || lower.contains("flurr") || lower.contains("blizzard") -> "snow"
             lower.contains("drizzle") -> "light drizzle"
             lower.contains("shower") -> "showers"
             lower.contains("rain") -> "rain"
-            rainProbability >= 60 -> "rain likely"
+            rainProbability >= 60 -> when {
+                precipType.equals("SNOW", ignoreCase = true) || (maxTempC != null && maxTempC <= 0) -> "snow likely"
+                precipType.equals("ICE", ignoreCase = true) -> "freezing rain likely"
+                else -> "rain likely"
+            }
             lower.contains("overcast") -> "overcast skies"
             lower.contains("part") || lower.contains("scatter") -> "cloud and sun"
             lower.contains("cloud") -> "cloud"

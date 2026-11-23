@@ -23,6 +23,8 @@ internal object WeatherMapper {
 
     private val HOUR_KEY_FORMATTER: DateTimeFormatter =
         DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:00", Locale.US)
+    private val CLOCK_HHMM_FORMATTER: DateTimeFormatter =
+        DateTimeFormatter.ofPattern("HH:mm", Locale.US)
 
     internal fun mapEnsembleDashboardData(
         current: CurrentConditionsResponse,
@@ -37,7 +39,9 @@ internal object WeatherMapper {
         googleAlerts: PublicAlertsResponse? = null,
         sawsAlerts: List<OfficialWeatherAlert> = emptyList(),
         globalOfficialAlerts: List<OfficialWeatherAlert> = emptyList(),
-        fallbackTimezone: String? = null
+        fallbackTimezone: String? = null,
+        referenceNow: ZonedDateTime? = null,
+        liveSatellite: LiveSatelliteStormObservation? = null
     ): WeatherDashboardData {
         val zoneId = resolveBestZoneId(
             current.timeZone?.id,
@@ -47,7 +51,8 @@ internal object WeatherMapper {
         )
         val timezoneId = zoneId.id
         val promotedModel = omConsensus?.promotedRegionalModelId
-        val nowZoned = ZonedDateTime.now(zoneId)
+        val nowZoned = referenceNow?.withZoneSameInstant(zoneId) ?: ZonedDateTime.now(zoneId)
+        val locationToday = nowZoned.toLocalDate()
         val currentLocalDateHour = nowZoned.toLocalDateTime().truncatedTo(ChronoUnit.HOURS)
         val currentLocalHour = nowZoned.hour
         val nowHourKey = currentLocalDateHour.format(HOUR_KEY_FORMATTER)
@@ -109,11 +114,31 @@ internal object WeatherMapper {
         )
         val feelsReason = buildFeelsLikeReason(blendedCurrentTemp, blendedFeelsTemp, effectiveHumidityForPhysics, windSpeed, isDay)
 
-        val todayForecast = daily.forecastDays?.firstOrNull()
-        val todayLocalDate = todayForecast?.displayDate?.let { parseDisplayDate(it, zoneId) }
-        val todayOmIdx = todayLocalDate?.toString()?.let { iso ->
-            omForecast?.daily?.time?.indexOf(iso)?.takeIf { it >= 0 }
-        } ?: 0
+        // Between 00:00 and 06:59 local time, Google's 07:00–07:00 meteorological day returns
+        // yesterday as forecastDays[0] while Open-Meteo and Google hourly start on today.
+        // Drop the expired leading yesterday entry whenever today is present so calendar days,
+        // Open-Meteo indices, sun events, and DayDetail hourly charts align cleanly.
+        val rawForecastDays = daily.forecastDays.orEmpty()
+        val firstDayDate = rawForecastDays.firstOrNull()?.displayDate?.let { parseDisplayDate(it, zoneId, locationToday) }
+        val hasEarlyMorningYesterdayShift = firstDayDate == locationToday.minusDays(1) &&
+            rawForecastDays.any { it.displayDate?.let { d -> parseDisplayDate(d, zoneId, locationToday) } == locationToday }
+        val effectiveForecastDays = if (hasEarlyMorningYesterdayShift) {
+            rawForecastDays.dropWhile { day ->
+                val d = day.displayDate?.let { parseDisplayDate(it, zoneId, locationToday) }
+                d != null && d.isBefore(locationToday)
+            }
+        } else {
+            rawForecastDays
+        }
+
+        val omDailyTimes = omForecast?.daily?.time.orEmpty()
+        val todayForecast = effectiveForecastDays.firstOrNull()
+        val todayLocalDate = todayForecast?.displayDate?.let { parseDisplayDate(it, zoneId, locationToday) }
+        val todayOmIdx = when {
+            omDailyTimes.isEmpty() -> 0
+            todayLocalDate != null -> omDailyTimes.indexOf(todayLocalDate.toString())
+            else -> omDailyTimes.indexOf(locationToday.toString()).takeIf { it >= 0 } ?: 0
+        }
 
         val gHigh = todayForecast?.maxTemperature?.degrees
         val omHigh = omForecast?.daily?.temperature2mMax?.getOrNull(todayOmIdx)
@@ -222,7 +247,7 @@ internal object WeatherMapper {
                 val label = if (isNowAnchor) {
                     "Now"
                 } else {
-                    item.displayDateTime?.hours?.let { String.format(Locale.getDefault(), "%02d:00", it) } ?: "—"
+                    item.displayDateTime?.hours?.let { String.format(Locale.US, "%02d:00", it) } ?: "—"
                 }
 
                 if (isNowAnchor) {
@@ -270,7 +295,7 @@ internal object WeatherMapper {
             }
             built
         } else {
-            extractNext24HoursFromOpenMeteo(omForecast, zoneId, omConsensus).mapIndexed { idx, item ->
+            extractNext24HoursFromOpenMeteo(omForecast, zoneId, omConsensus, nowZoned).mapIndexed { idx, item ->
                 if (idx == 0) {
                     item.copy(
                         tempDegrees = blendedCurrentTemp,
@@ -292,16 +317,20 @@ internal object WeatherMapper {
 
         // Build Short-Term Precipitation Forecast (or native 15-min nowcast in Central Europe / North America)
         val useNative15Min = WeatherConsensus.hasNative15MinNowcast(latitude, longitude)
-        val nowcast = if (useNative15Min && omForecast?.minutely15 != null) {
-            parsePrecipitationNowcast(omForecast.minutely15, zoneId)
+        val baseNowcast = if (useNative15Min && omForecast?.minutely15 != null) {
+            parsePrecipitationNowcast(omForecast.minutely15, zoneId, referenceNow = nowZoned.toLocalDateTime())
                 ?: buildShortTermRainForecast(hourlyItems)
         } else {
             buildShortTermRainForecast(hourlyItems)
         }
+        val nowcast = enhanceNowcastWithLiveSatellite(baseNowcast, liveSatellite)
 
         // Merge official government alerts (Google Public Alerts + SAWS + US NWS + Canada ECCC)
-        val parsedGoogleAlerts = parseGooglePublicAlerts(googleAlerts, zoneId)
-        val officialAlerts = mergeOfficialAlerts(parsedGoogleAlerts, sawsAlerts, globalOfficialAlerts)
+        // Reformat US/Canada/external alert expiry timestamps into the resolved location timezone.
+        val parsedGoogleAlerts = parseGooglePublicAlerts(googleAlerts, zoneId, now = nowZoned.toInstant())
+        val localizedGlobalAlerts = reformatAlertExpiriesForZone(globalOfficialAlerts, zoneId)
+        val localizedSawsAlerts = reformatAlertExpiriesForZone(sawsAlerts, zoneId)
+        val officialAlerts = mergeOfficialAlerts(parsedGoogleAlerts, localizedSawsAlerts, localizedGlobalAlerts)
 
         // Severe weather & thunderstorm risk pill calculation (24-hour storm scanner + official alerts)
         val next24Hours = futureGHours.take(24)
@@ -344,23 +373,26 @@ internal object WeatherMapper {
             condType = condType,
             currentLocalHour = currentLocalHour,
             maxGustNext24 = maxGustNext24,
-            officialAlerts = officialAlerts
+            officialAlerts = officialAlerts,
+            liveSatellite = liveSatellite
         )
 
         // Daily forecast processing (up to 10 days, aligned to Google's 07:00–07:00 meteorological day
         // so Tonight's overnight low matches mainstream apps and blends the exact same night!)
-        val omDailyTimes = omForecast?.daily?.time.orEmpty()
-        val observedTodayMax = current.currentConditionsHistory?.maxTemperature?.degrees
-        val dailyItems = (daily.forecastDays ?: emptyList()).mapIndexed { idx, day ->
-            val localDate = day.displayDate?.let { parseDisplayDate(it, zoneId) }
-                ?: LocalDate.now(zoneId).plusDays(idx.toLong())
-            val omIdx = localDate.toString().let { iso ->
-                omDailyTimes.indexOf(iso).takeIf { it >= 0 }
-            } ?: idx
+        val dailyItems = effectiveForecastDays.mapIndexed { idx, day ->
+            val localDate = day.displayDate?.let { parseDisplayDate(it, zoneId, locationToday) }
+                ?: locationToday.plusDays(idx.toLong())
+            val omIdx = if (omDailyTimes.isNotEmpty()) {
+                omDailyTimes.indexOf(localDate.toString())
+            } else {
+                idx
+            }
 
-            val dayLabel = when (idx) {
-                0 -> "Today"
-                1 -> "Tomorrow"
+            val dayLabel = when {
+                localDate == locationToday -> "Today"
+                localDate == locationToday.plusDays(1) -> "Tomorrow"
+                idx == 0 -> "Today"
+                idx == 1 -> "Tomorrow"
                 else -> localDate.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.getDefault())
             }
             val dateText = "${localDate.monthValue}/${localDate.dayOfMonth}"
@@ -381,7 +413,8 @@ internal object WeatherMapper {
                 omConsensus = omConsensus,
                 todayHoursFallback = hourlyItems,
                 currentLocalDateHour = currentLocalDateHour,
-                zoneId = zoneId
+                zoneId = zoneId,
+                locationToday = locationToday
             )
 
             // Real AM (06-11), PM (12-17), and Night (18-23 + next 00-05) winds across all 10 days
@@ -457,12 +490,12 @@ internal object WeatherMapper {
             val rawBlendedMin = WeatherConsensus.blendConsensusTemperature(gMin, minModelMap, leadHoursMidday + 12, promotedModel)?.roundToInt()
                 ?: hourlyMin ?: rawLowTemp
 
-            // Bound daily high accurately (including observed earlier-today high from Google history!)
+            // Bound daily high accurately without letting rolling past-24h history from yesterday
+            // inflate morning highs after an overnight cold front.
             val candidateMax = listOfNotNull(
                 rawBlendedMax,
                 hourlyMax,
-                if (idx == 0) blendedCurrentTemp else null,
-                if (idx == 0) observedTodayMax?.roundToInt() else null
+                if (idx == 0) blendedCurrentTemp else null
             ).maxOrNull() ?: rawBlendedMax
 
             // When aligned to Tonight's 19:00–07:00 overnight low, do NOT let this morning's expired
@@ -753,9 +786,10 @@ internal object WeatherMapper {
             latitude = latitude,
             isDaytimeHint = isDay,
             dayHourlyIsDay = (0..23).mapNotNull { h ->
-                val dateForSun = todayLocalDate ?: LocalDate.now(zoneId)
+                val dateForSun = todayLocalDate ?: locationToday
                 omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", dateForSun, h)]?.isDay
-            }
+            },
+            referenceTime = nowZoned.toLocalTime()
         )
         val sunriseStr = todaySun.sunriseLabel
         val sunsetStr = todaySun.sunsetLabel
@@ -802,7 +836,8 @@ internal object WeatherMapper {
             ensemble = ensemble,
             timezone = timezoneId,
             latitude = latitude,
-            longitude = longitude
+            longitude = longitude,
+            liveSatellite = liveSatellite
         )
     }
 
@@ -820,19 +855,30 @@ internal object WeatherMapper {
         googleAlerts: PublicAlertsResponse? = null,
         sawsAlerts: List<OfficialWeatherAlert> = emptyList(),
         globalOfficialAlerts: List<OfficialWeatherAlert> = emptyList(),
-        fallbackTimezone: String? = null
+        fallbackTimezone: String? = null,
+        referenceNow: ZonedDateTime? = null,
+        liveSatellite: LiveSatelliteStormObservation? = null
     ): WeatherDashboardData {
         val zoneId = resolveBestZoneId(omForecast.timezone, fallbackTimezone)
         val timezoneId = zoneId.id
         val promotedModel = omConsensus?.promotedRegionalModelId
-        val nowZoned = ZonedDateTime.now(zoneId)
+        val nowZoned = referenceNow?.withZoneSameInstant(zoneId) ?: ZonedDateTime.now(zoneId)
+        val locationToday = nowZoned.toLocalDate()
         val currentLocalDateHour = nowZoned.toLocalDateTime().truncatedTo(ChronoUnit.HOURS)
         val currentLocalHour = nowZoned.hour
         val nowHourKey = currentLocalDateHour.format(HOUR_KEY_FORMATTER)
 
+        val omHourlyByDateHour = parseOpenMeteoHourlyMap(omForecast.hourly)
+        val currentOmHourSlot = omHourlyByDateHour[nowHourKey]
+
         val omCurrent = omForecast.current
-        val isDay = (omCurrent?.isDay ?: 1) == 1
-        val wmoCode = omCurrent?.weatherCode ?: 0
+        val isDay = omCurrent?.isDay?.let { it == 1 }
+            ?: currentOmHourSlot?.isDay
+            ?: (currentLocalHour in 6..18)
+        val wmoCode = omCurrent?.weatherCode
+            ?: currentOmHourSlot?.weatherCode
+            ?: omForecast.daily?.weatherCode?.firstOrNull()
+            ?: 0
         val descText = mapWmoCodeToCondition(wmoCode, isDay)
 
         val skyTheme = when {
@@ -844,7 +890,6 @@ internal object WeatherMapper {
             else -> SkyThemeType.CLEAR_DAY
         }
 
-        val omHourlyByDateHour = parseOpenMeteoHourlyMap(omForecast.hourly)
         val currentConsensusSlot = omConsensus?.hourlyByTime?.get(nowHourKey)
         val currentModelMap = buildCurrentModelMap(omCurrent?.temperature2m, currentConsensusSlot)
 
@@ -883,28 +928,31 @@ internal object WeatherMapper {
         val rawLowTemp = omForecast.daily?.temperature2mMin?.firstOrNull()?.roundToInt() ?: currentTemp
         val locationName = resolveHonestLocationName(resolvedLocationName, latitude, longitude)
 
-        val hourlyItems = extractNext24HoursFromOpenMeteo(omForecast, zoneId, omConsensus).mapIndexed { idx, item ->
+        val hourlyItems = extractNext24HoursFromOpenMeteo(omForecast, zoneId, omConsensus, nowZoned).mapIndexed { idx, item ->
             if (idx == 0) item.copy(tempDegrees = currentTemp) else item
         }
 
         val useNative15Min = WeatherConsensus.hasNative15MinNowcast(latitude, longitude)
-        val nowcast = if (useNative15Min && omForecast.minutely15 != null) {
-            parsePrecipitationNowcast(omForecast.minutely15, zoneId)
+        val baseNowcast = if (useNative15Min && omForecast.minutely15 != null) {
+            parsePrecipitationNowcast(omForecast.minutely15, zoneId, referenceNow = nowZoned.toLocalDateTime())
                 ?: buildShortTermRainForecast(hourlyItems)
         } else {
             buildShortTermRainForecast(hourlyItems)
         }
+        val nowcast = enhanceNowcastWithLiveSatellite(baseNowcast, liveSatellite)
 
         val dailyTimes = omForecast.daily?.time.orEmpty()
         val dailyItems = dailyTimes.mapIndexed { idx, dateIso ->
             val localDate = try {
                 LocalDate.parse(dateIso)
             } catch (_: Exception) {
-                LocalDate.now(zoneId).plusDays(idx.toLong())
+                locationToday.plusDays(idx.toLong())
             }
-            val dayLabel = when (idx) {
-                0 -> "Today"
-                1 -> "Tomorrow"
+            val dayLabel = when {
+                localDate == locationToday -> "Today"
+                localDate == locationToday.plusDays(1) -> "Tomorrow"
+                idx == 0 -> "Today"
+                idx == 1 -> "Tomorrow"
                 else -> localDate.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.getDefault())
             }
             val dateText = "${localDate.monthValue}/${localDate.dayOfMonth}"
@@ -946,7 +994,7 @@ internal object WeatherMapper {
                 } ?: return@mapNotNull null
                 val pop = blendHourlyPop(null, alignedPrecipSlot?.pop ?: slot.pop, cPrecip?.popByModel, lead, promotedModel)
                 val mm = blendHourlyPrecipMm(null, alignedPrecipSlot?.precipMm ?: slot.precipMm, cPrecip?.precipByModel, lead, promotedModel)
-                slot.toHourlyItem(String.format(Locale.getDefault(), "%02d:00", h), temp).copy(
+                slot.toHourlyItem(String.format(Locale.US, "%02d:00", h), temp).copy(
                     rainProbability = pop,
                     precipitationMm = roundOneDecimal(mm)
                 )
@@ -1103,17 +1151,20 @@ internal object WeatherMapper {
             latitude = latitude,
             isDaytimeHint = isDay,
             dayHourlyIsDay = (0..23).mapNotNull { h ->
-                omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", LocalDate.now(zoneId), h)]?.isDay
-            }
+                omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", locationToday, h)]?.isDay
+            },
+            referenceTime = nowZoned.toLocalTime()
         )
         val sunriseToday = todaySun.sunriseLabel
         val sunsetToday = todaySun.sunsetLabel
         val aqiSummary = WeatherConsensus.resolveAirQuality(omAqi?.current)
-        val omWindDeg = omCurrent?.windDirection10m ?: 0
-        val omWindDir = degreesToCardinal(omWindDeg)
+        val rawOmWindDeg = omCurrent?.windDirection10m
+        val omWindDir = rawOmWindDeg?.let { degreesToCardinal(it) }
+            ?: currentOmHourSlot?.windDirection
+            ?: "—"
+        val omWindDeg = rawOmWindDeg ?: cardinalToDegrees(omWindDir)
         val omMaxUv = omForecast.daily?.uvIndexMax?.firstOrNull()?.roundToInt() ?: (dailyItems.firstOrNull()?.uvIndex ?: 0)
 
-        val currentOmHourSlot = omHourlyByDateHour[nowHourKey]
         // Never fall back to daily peak UV at night
         val currentUv = if (!isDay) {
             0
@@ -1161,8 +1212,10 @@ internal object WeatherMapper {
             daylightStatusOverride = todaySun.daylightStatusOverride
         )
 
-        val parsedGoogleAlerts = parseGooglePublicAlerts(googleAlerts, zoneId)
-        val officialAlerts = mergeOfficialAlerts(parsedGoogleAlerts, sawsAlerts, globalOfficialAlerts)
+        val parsedGoogleAlerts = parseGooglePublicAlerts(googleAlerts, zoneId, now = nowZoned.toInstant())
+        val localizedGlobalAlerts = reformatAlertExpiriesForZone(globalOfficialAlerts, zoneId)
+        val localizedSawsAlerts = reformatAlertExpiriesForZone(sawsAlerts, zoneId)
+        val officialAlerts = mergeOfficialAlerts(parsedGoogleAlerts, localizedSawsAlerts, localizedGlobalAlerts)
 
         val hourlyStormList = hourlyItems.map { it.thunderstormProbability }
         val currentStormProb = if (wmoCode in 95..99) 70 else 0
@@ -1178,7 +1231,8 @@ internal object WeatherMapper {
             condType = if (wmoCode in 95..99) "THUNDERSTORM" else "",
             currentLocalHour = currentLocalHour,
             maxGustNext24 = maxOmGustNext24,
-            officialAlerts = officialAlerts
+            officialAlerts = officialAlerts,
+            liveSatellite = liveSatellite
         )
 
         return WeatherDashboardData(
@@ -1191,7 +1245,8 @@ internal object WeatherMapper {
             ensemble = ensemble,
             timezone = timezoneId,
             latitude = latitude,
-            longitude = longitude
+            longitude = longitude,
+            liveSatellite = liveSatellite
         )
     }
 
@@ -1245,6 +1300,40 @@ internal object WeatherMapper {
         }
     }
 
+    internal fun enhanceNowcastWithLiveSatellite(
+        baseNowcast: PrecipitationNowcast?,
+        liveSatellite: LiveSatelliteStormObservation?
+    ): PrecipitationNowcast? {
+        if (liveSatellite == null || !liveSatellite.hasObservedRain) return baseNowcast
+        val rate = liveSatellite.effectiveRainRateMmH
+        val rateText = String.format(Locale.US, "%.1f mm/h", rate)
+        if (baseNowcast == null || !baseNowcast.isPrecipitationImminent) {
+            return PrecipitationNowcast(
+                summaryText = "Rain observed by satellite now (~$rateText)",
+                isPrecipitationImminent = true,
+                nextPrecipitationOnsetMinutes = 0,
+                maxRateMmH = rate,
+                intervals = baseNowcast?.intervals.orEmpty(),
+                rainCessationMinutes = baseNowcast?.rainCessationMinutes,
+                isHighRes15Min = false,
+                headlineLabel = "LIVE SATELLITE RAIN",
+                onsetRateMmH = rate,
+                precipitationLabel = "Rain"
+            )
+        }
+        return if (!baseNowcast.isHighRes15Min && baseNowcast.nextPrecipitationOnsetMinutes == 0 &&
+            !baseNowcast.summaryText.contains("satellite", ignoreCase = true)
+        ) {
+            baseNowcast.copy(
+                summaryText = "${baseNowcast.summaryText.removeSuffix(".")} · Satellite ~$rateText",
+                maxRateMmH = maxOf(baseNowcast.maxRateMmH, rate),
+                onsetRateMmH = maxOf(baseNowcast.onsetRateMmH, rate)
+            )
+        } else {
+            baseNowcast
+        }
+    }
+
     private fun buildSevereAlertInfo(
         hourlyItems: List<HourlyItem>,
         hourlyStormList: List<Int>,
@@ -1253,7 +1342,8 @@ internal object WeatherMapper {
         condType: String,
         currentLocalHour: Int,
         maxGustNext24: Int,
-        officialAlerts: List<OfficialWeatherAlert>
+        officialAlerts: List<OfficialWeatherAlert>,
+        liveSatellite: LiveSatelliteStormObservation? = null
     ): SevereAlertInfo {
         fun qualifyStormHourLabel(idx: Int, rawLabel: String?): String? {
             if (rawLabel.isNullOrBlank() || idx <= 0 || rawLabel.equals("Now", ignoreCase = true)) return rawLabel
@@ -1305,14 +1395,23 @@ internal object WeatherMapper {
                 "Scanned next 24h forecast window."
         }
 
+        val isWintryPrecip = hourlyItems.any { h ->
+            val lower = h.conditionText.lowercase(Locale.US)
+            (h.precipitationMm > 0.0 || h.rainProbability >= 40) && (
+                lower.contains("snow") || lower.contains("sleet") || lower.contains("blizzard") ||
+                    lower.contains("flurr") || lower.contains("freezing") || lower.contains("ice") ||
+                    h.tempDegrees <= 0
+                )
+        }
+        val precipUnitWord = if (isWintryPrecip) "precip" else "rain"
         val telemetryClause = buildList {
-            if (totalPrecipNext24 > 0.0) add(String.format(Locale.getDefault(), "%.1f mm rain", totalPrecipNext24))
+            if (totalPrecipNext24 > 0.0) add(String.format(Locale.US, "%.1f mm %s", totalPrecipNext24, precipUnitWord))
             if (maxGustNext24 > 0) add("gusts up to $maxGustNext24 km/h")
         }.joinToString(" • ")
 
         val extraDetails = if (telemetryClause.isNotBlank()) " ($telemetryClause)." else ""
 
-        val (stormRiskLevel, stormTitle, stormDesc) = when {
+        val (baseStormRiskLevel, baseStormTitle, baseStormDesc) = when {
             stormProb >= 60 || condType.contains("THUNDER", ignoreCase = true) || condType.contains("STORM", ignoreCase = true) -> Triple(
                 SeverityRiskLevel.SEVERE,
                 "SEVERE THUNDERSTORM WARNING",
@@ -1335,12 +1434,44 @@ internal object WeatherMapper {
             )
         }
 
+        val activeSat = liveSatellite?.takeIf { it.hasActiveStormOrLightning }
+        val satRiskLevel = when {
+            activeSat == null -> SeverityRiskLevel.LOW
+            activeSat.lightningNearby && (activeSat.nearestLightningKm == null || activeSat.nearestLightningKm <= 15) ->
+                SeverityRiskLevel.SEVERE
+            activeSat.activeStormPhase?.equals("Mature", ignoreCase = true) == true ||
+                activeSat.activeStormPhase?.equals("Severe", ignoreCase = true) == true ->
+                SeverityRiskLevel.SEVERE
+            else -> SeverityRiskLevel.HIGH
+        }
+        val stormRiskLevel = maxOf(baseStormRiskLevel, satRiskLevel)
+        val effectivePeakLabel = if (activeSat != null) "Now" else peakHourTimeStr
+        val satHeadline = when {
+            activeSat == null -> baseStormTitle
+            activeSat.lightningNearby -> "LIVE LIGHTNING DETECTED NEARBY"
+            else -> "ACTIVE THUNDERSTORM CELL NEARBY"
+        }
+        val stormTitle = if (activeSat != null && satRiskLevel.ordinal >= baseStormRiskLevel.ordinal) {
+            satHeadline
+        } else {
+            baseStormTitle
+        }
+        val stormDesc = if (activeSat != null) {
+            val satLine = activeSat.formatCompactSummary().orEmpty()
+            val satSentence = if (satLine.isNotBlank()) "$satLine (${activeSat.sourceLabel}). " else ""
+            "$satSentence$baseStormDesc".trim()
+        } else {
+            baseStormDesc
+        }
+
         val topOfficial = officialAlerts.firstOrNull()
         return if (topOfficial != null && topOfficial.severity.ordinal >= stormRiskLevel.ordinal) {
-            val officialPrefix = if (topOfficial.severityLabel.isNotBlank()) {
-                "${topOfficial.title} (${topOfficial.severityLabel})"
-            } else {
+            val hasRedundantLabel = topOfficial.severityLabel.isBlank() ||
+                topOfficial.title.contains(topOfficial.severityLabel, ignoreCase = true)
+            val officialPrefix = if (hasRedundantLabel) {
                 topOfficial.title
+            } else {
+                "${topOfficial.title} (${topOfficial.severityLabel})"
             }
             val officialDetails = buildString {
                 if (topOfficial.areaName.isNotBlank()) append("Area: ${topOfficial.areaName}. ")
@@ -1354,10 +1485,11 @@ internal object WeatherMapper {
                 title = officialPrefix,
                 subtitle = officialDetails,
                 isVisible = true,
-                peakHourLabel = peakHourTimeStr,
+                peakHourLabel = effectivePeakLabel,
                 hourlyStormProbabilities = hourlyStormList,
                 officialAlerts = officialAlerts,
-                sourceLabel = topOfficial.source
+                sourceLabel = topOfficial.source,
+                liveSatellite = liveSatellite
             )
         } else {
             SevereAlertInfo(
@@ -1366,10 +1498,11 @@ internal object WeatherMapper {
                 title = stormTitle,
                 subtitle = stormDesc,
                 isVisible = true,
-                peakHourLabel = peakHourTimeStr,
+                peakHourLabel = effectivePeakLabel,
                 hourlyStormProbabilities = hourlyStormList,
                 officialAlerts = officialAlerts,
-                sourceLabel = topOfficial?.source
+                sourceLabel = if (activeSat != null) activeSat.sourceLabel else null,
+                liveSatellite = liveSatellite
             )
         }
     }
@@ -1418,7 +1551,7 @@ internal object WeatherMapper {
                 }
             }
             val expiresLabel = expInstant?.let {
-                DateTimeFormatter.ofPattern("EEE HH:mm", Locale.getDefault())
+                DateTimeFormatter.ofPattern("EEE HH:mm", Locale.US)
                     .withZone(zoneId)
                     .format(it)
             }.orEmpty()
@@ -1432,8 +1565,25 @@ internal object WeatherMapper {
                 description = item.description.orEmpty().trim(),
                 instruction = combinedInstructions,
                 expiresLabel = expiresLabel,
-                severityLabel = item.severity?.lowercase()?.replaceFirstChar { it.uppercase() }.orEmpty()
+                severityLabel = item.severity?.lowercase()?.replaceFirstChar { it.uppercase() }.orEmpty(),
+                expiresEpochMs = expInstant?.toEpochMilli()
             )
+        }
+    }
+
+    internal fun reformatAlertExpiriesForZone(
+        alerts: List<OfficialWeatherAlert>,
+        zoneId: ZoneId
+    ): List<OfficialWeatherAlert> {
+        if (alerts.isEmpty()) return alerts
+        val formatter = DateTimeFormatter.ofPattern("EEE HH:mm", Locale.US).withZone(zoneId)
+        return alerts.map { alert ->
+            val epochMs = alert.expiresEpochMs
+            if (epochMs != null) {
+                alert.copy(expiresLabel = formatter.format(Instant.ofEpochMilli(epochMs)))
+            } else {
+                alert
+            }
         }
     }
 
@@ -1442,9 +1592,11 @@ internal object WeatherMapper {
     ): List<OfficialWeatherAlert> {
         return lists.flatMap { it }
             .distinctBy { alert ->
-                val normTitle = alert.title.lowercase(Locale.US).replace(Regex("[^a-z0-9]"), "")
-                val normEvent = alert.eventType.lowercase(Locale.US).replace(Regex("[^a-z0-9]"), "")
-                normTitle.ifBlank { normEvent }
+                val normTitle = alert.title.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+                val normEvent = alert.eventType.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{Nd}]"), "")
+                normTitle.ifBlank { normEvent }.ifBlank {
+                    "${alert.source}|${alert.areaName}|${alert.description.take(40)}"
+                }
             }
             .sortedByDescending { it.severity.ordinal }
     }
@@ -1706,6 +1858,8 @@ internal object WeatherMapper {
     /**
      * Computes each model's overnight low over Google's exact nighttime window:
      * 19:00 on [date] through 07:00 on [date + 1 day].
+     * Requires pre-dawn next-day coverage (at least 4 hours in 00:00..07:00) so the final
+     * forecast day (Day 10) never uses warm evening-only temperatures as an overnight minimum.
      */
     private fun computeOvernightWindowModelLows(
         date: LocalDate,
@@ -1713,23 +1867,23 @@ internal object WeatherMapper {
         omHourly: Map<String, OmHourSlot>
     ): Map<String, Double> {
         val nextDate = date.plusDays(1)
-        val hours = (19..23).map { date.atTime(it, 0).format(HOUR_KEY_FORMATTER) } +
-            (0..7).map { nextDate.atTime(it, 0).format(HOUR_KEY_FORMATTER) }
+        val eveningHours = (19..23).map { date.atTime(it, 0).format(HOUR_KEY_FORMATTER) }
+        val preDawnHours = (0..7).map { nextDate.atTime(it, 0).format(HOUR_KEY_FORMATTER) }
 
         if (omConsensus != null && omConsensus.activeModels.isNotEmpty()) {
             val perModel = LinkedHashMap<String, Double>()
             for (model in omConsensus.activeModels) {
-                val vals = hours.mapNotNull { omConsensus.hourlyByTime[it]?.tempsByModel?.get(model) }
-                if (vals.size >= 4) perModel[model] = vals.min()
+                val preDawnVals = preDawnHours.mapNotNull { omConsensus.hourlyByTime[it]?.tempsByModel?.get(model) }
+                if (preDawnVals.size < 4) continue
+                val eveningVals = eveningHours.mapNotNull { omConsensus.hourlyByTime[it]?.tempsByModel?.get(model) }
+                perModel[model] = (eveningVals + preDawnVals).min()
             }
             if (perModel.isNotEmpty()) return perModel
         }
-        val singleVals = hours.mapNotNull { omHourly[it]?.temp }
-        return if (singleVals.size >= 4) {
-            mapOf(WeatherConsensus.MODEL_BEST_MATCH to singleVals.min())
-        } else {
-            emptyMap()
-        }
+        val preDawnSingle = preDawnHours.mapNotNull { omHourly[it]?.temp }
+        if (preDawnSingle.size < 4) return emptyMap()
+        val eveningSingle = eveningHours.mapNotNull { omHourly[it]?.temp }
+        return mapOf(WeatherConsensus.MODEL_BEST_MATCH to (eveningSingle + preDawnSingle).min())
     }
 
     private fun computeOvernightHourlyMin(
@@ -1775,25 +1929,28 @@ internal object WeatherMapper {
         omHourly: Map<String, OmHourSlot>
     ): Map<String, Int> {
         val nextDate = date.plusDays(1)
-        val keys = (19..23).map { date.atTime(it, 0).plusHours(1).format(HOUR_KEY_FORMATTER) } +
-            (0..6).map { nextDate.atTime(it, 0).plusHours(1).format(HOUR_KEY_FORMATTER) }
+        val eveningKeys = (19..23).map { date.atTime(it, 0).plusHours(1).format(HOUR_KEY_FORMATTER) }
+        val preDawnKeys = (0..6).map { nextDate.atTime(it, 0).plusHours(1).format(HOUR_KEY_FORMATTER) }
         if (omConsensus != null && omConsensus.activeModels.isNotEmpty()) {
             val perModel = LinkedHashMap<String, Int>()
             for (model in omConsensus.activeModels) {
-                val vals = keys.mapNotNull { omConsensus.hourlyByTime[it]?.popByModel?.get(model) }
-                if (vals.size >= 4) perModel[model] = vals.max()
+                val preDawnVals = preDawnKeys.mapNotNull { omConsensus.hourlyByTime[it]?.popByModel?.get(model) }
+                if (preDawnVals.size < 4) continue
+                val eveningVals = eveningKeys.mapNotNull { omConsensus.hourlyByTime[it]?.popByModel?.get(model) }
+                perModel[model] = (eveningVals + preDawnVals).max()
             }
             if (perModel.isNotEmpty()) return perModel
         }
-        val singleVals = keys.mapNotNull { omHourly[it]?.pop }
-        return if (singleVals.size >= 4) {
-            mapOf(WeatherConsensus.MODEL_BEST_MATCH to singleVals.max())
-        } else {
-            emptyMap()
-        }
+        val preDawnSingle = preDawnKeys.mapNotNull { omHourly[it]?.pop }
+        if (preDawnSingle.size < 4) return emptyMap()
+        val eveningSingle = eveningKeys.mapNotNull { omHourly[it]?.pop }
+        return mapOf(WeatherConsensus.MODEL_BEST_MATCH to (eveningSingle + preDawnSingle).max())
     }
 
-    /** Sums 07:00..07:00 24h precipitation per model (shifted +1h for preceding-hour OM convention). */
+    /**
+     * Sums 07:00..07:00 24h precipitation per model (shifted +1h for preceding-hour OM convention).
+     * Requires near-full 24h coverage (>= 22 hours) so Day 10 never silently truncates 8 overnight hours.
+     */
     private fun compute24hWindowPrecipByModel(
         date: LocalDate,
         omConsensus: WeatherConsensus.MultiModelConsensusData?,
@@ -1805,12 +1962,12 @@ internal object WeatherMapper {
             val perModel = LinkedHashMap<String, Double>()
             for (model in omConsensus.activeModels) {
                 val vals = keys.mapNotNull { omConsensus.hourlyByTime[it]?.precipByModel?.get(model) }
-                if (vals.size >= 12) perModel[model] = vals.sum()
+                if (vals.size >= 22) perModel[model] = vals.sum()
             }
             if (perModel.isNotEmpty()) return perModel
         }
         val singleVals = keys.mapNotNull { omHourly[it]?.precipMm }
-        return if (singleVals.size >= 12) {
+        return if (singleVals.size >= 22) {
             mapOf(WeatherConsensus.MODEL_BEST_MATCH to singleVals.sum())
         } else {
             emptyMap()
@@ -1892,15 +2049,17 @@ internal object WeatherMapper {
     private fun extractNext24HoursFromOpenMeteo(
         omForecast: OpenMeteoForecastResponse?,
         zoneId: ZoneId,
-        omConsensus: WeatherConsensus.MultiModelConsensusData? = null
+        omConsensus: WeatherConsensus.MultiModelConsensusData? = null,
+        referenceNow: ZonedDateTime? = null
     ): List<HourlyItem> {
         val hourly = omForecast?.hourly ?: return emptyList()
         val times = hourly.time ?: return emptyList()
-        val nowLdt = ZonedDateTime.now(zoneId).toLocalDateTime().truncatedTo(ChronoUnit.HOURS)
+        val nowZoned = referenceNow?.withZoneSameInstant(zoneId) ?: ZonedDateTime.now(zoneId)
+        val nowLdt = nowZoned.toLocalDateTime().truncatedTo(ChronoUnit.HOURS)
         val nowHourPrefix = nowLdt.format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH", Locale.US))
         val matchedIndex = times.indexOfFirst { it.startsWith(nowHourPrefix) }
         val startIndex = if (matchedIndex >= 0) matchedIndex else {
-            val todayPrefix = LocalDate.now(zoneId).toString()
+            val todayPrefix = nowZoned.toLocalDate().toString()
             times.indexOfFirst { it.startsWith(todayPrefix) }.takeIf { it >= 0 } ?: return emptyList()
         }
         val map = parseOpenMeteoHourlyMap(hourly)
@@ -1938,10 +2097,10 @@ internal object WeatherMapper {
         omConsensus: WeatherConsensus.MultiModelConsensusData?,
         todayHoursFallback: List<HourlyItem>,
         currentLocalDateHour: LocalDateTime,
-        zoneId: ZoneId
+        zoneId: ZoneId,
+        locationToday: LocalDate = LocalDate.now(zoneId)
     ): List<HourlyItem> {
-        val locationToday = LocalDate.now(zoneId)
-        val targetDate = localDate ?: day.displayDate?.let { parseDisplayDate(it, zoneId) }
+        val targetDate = localDate ?: day.displayDate?.let { parseDisplayDate(it, zoneId, locationToday) }
             ?: locationToday.plusDays(dayIdx.toLong())
 
         val dayYear = targetDate.year
@@ -1956,7 +2115,7 @@ internal object WeatherMapper {
 
         val fallbackTemp = day.maxTemperature?.degrees?.roundToInt() ?: 0
         val dayHours = (0..23).mapNotNull { h ->
-            val hStr = String.format(Locale.getDefault(), "%02d:00", h)
+            val hStr = String.format(Locale.US, "%02d:00", h)
             val slotLdt = targetDate.atTime(h, 0)
             val key = slotLdt.format(HOUR_KEY_FORMATTER)
             val gItem = matchedGoogle.firstOrNull { it.displayDateTime?.hours == h }
@@ -1998,7 +2157,9 @@ internal object WeatherMapper {
         }
 
         if (dayHours.isNotEmpty()) return dayHours
-        if (dayIdx == 0 && targetDate == locationToday && todayHoursFallback.isNotEmpty()) {
+        if (dayIdx == 0 && todayHoursFallback.isNotEmpty() &&
+            (targetDate == locationToday || targetDate == locationToday.minusDays(1))
+        ) {
             return todayHoursFallback
         }
         return emptyList()
@@ -2166,9 +2327,13 @@ internal object WeatherMapper {
         return hourlyList
     }
 
-    private fun parseDisplayDate(date: DisplayDate, zoneId: ZoneId): LocalDate? {
+    private fun parseDisplayDate(
+        date: DisplayDate,
+        zoneId: ZoneId,
+        fallbackToday: LocalDate = LocalDate.now(zoneId)
+    ): LocalDate? {
         return try {
-            LocalDate.of(date.year ?: LocalDate.now(zoneId).year, date.month ?: 1, date.day ?: 1)
+            LocalDate.of(date.year ?: fallbackToday.year, date.month ?: 1, date.day ?: 1)
         } catch (_: Exception) {
             null
         }
@@ -2199,12 +2364,12 @@ internal object WeatherMapper {
         return try {
             if (hasIsoTimezoneOffset(isoString)) {
                 val instant = OffsetDateTime.parse(isoString).toInstant()
-                DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
+                CLOCK_HHMM_FORMATTER
                     .withZone(zoneId)
                     .format(instant)
             } else {
                 val ldt = LocalDateTime.parse(isoString)
-                ldt.format(DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault()))
+                ldt.format(CLOCK_HHMM_FORMATTER)
             }
         } catch (_: Exception) {
             fallback
@@ -2273,15 +2438,13 @@ internal object WeatherMapper {
         }
     }
 
-    private fun extractGooglePrecipMm(precip: Precipitation?): Double? {
+    internal fun extractGooglePrecipMm(precip: Precipitation?): Double? {
         val liquid = precip?.qpf?.quantity
-        val snow = precip?.snowQpf?.quantity
-        return when {
-            liquid != null && snow != null && liquid <= 0.0 && snow > 0.0 -> snow
-            liquid != null -> liquid
-            snow != null -> snow
-            else -> null
-        }
+        if (liquid != null) return liquid
+        // Snow depth (snowQpf) is ~10-20x liquid water equivalent; only estimate liquid equivalent
+        // via standard 10:1 ratio when Google omits qpf completely.
+        val snow = precip?.snowQpf?.quantity ?: return null
+        return if (snow > 0.0) snow / 10.0 else 0.0
     }
 
     private fun resolvePrecipitationType(
@@ -2355,9 +2518,8 @@ internal object WeatherMapper {
                     )
                 }
             }
-            val fmt = DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
-            val riseStr = riseZdt.format(fmt)
-            val setStr = setZdt.format(fmt)
+            val riseStr = riseZdt.format(CLOCK_HHMM_FORMATTER)
+            val setStr = setZdt.format(CLOCK_HHMM_FORMATTER)
             return SunTimesResolution(
                 sunriseLabel = riseStr,
                 sunsetLabel = setStr,
@@ -2448,7 +2610,7 @@ internal object WeatherMapper {
             val pop = pops.getOrNull(i) ?: if (precipMm >= 0.1) 80 else 0
             val code = codes.getOrNull(i) ?: 0
             val minuteOffset = ChronoUnit.MINUTES.between(now, slotTime).toInt()
-            val label = tStr.substringAfter("T", "").take(5)
+            val label = slotTime.format(CLOCK_HHMM_FORMATTER)
             intervals.add(
                 MinutelyPrecipInterval(
                     minuteOffset = minuteOffset,

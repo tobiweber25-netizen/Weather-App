@@ -10,6 +10,10 @@ import com.google.weatherapp.data.repository.LocationSearchEngine
 import com.google.weatherapp.data.repository.WeatherRepository
 import com.google.weatherapp.location.LocationClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,21 +21,37 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
+
+data class PageNavigationEvent(
+    val targetKey: String,
+    val seq: Long = 0L,
+    val snapImmediately: Boolean = false
+)
 
 class WeatherViewModel @JvmOverloads constructor(
     application: Application,
     private val repository: WeatherRepository = WeatherRepository(
         localDataSource = WeatherLocalDataSource(application)
     ),
-    private val locationClient: LocationClient = LocationClient(application)
+    private val locationClient: LocationClient = LocationClient(application),
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val enablePolling: Boolean = true,
+    private val scopeOverride: CoroutineScope? = null
 ) : AndroidViewModel(application) {
+
+    private val vmScope: CoroutineScope
+        get() = scopeOverride ?: viewModelScope
 
     private val _uiState = MutableStateFlow<WeatherUiState>(WeatherUiState.Loading)
     val uiState: StateFlow<WeatherUiState> = _uiState.asStateFlow()
 
     private val _pageStates = MutableStateFlow<Map<String, WeatherUiState>>(emptyMap())
     val pageStates: StateFlow<Map<String, WeatherUiState>> = _pageStates.asStateFlow()
+
+    private val _refreshingPages = MutableStateFlow<Set<String>>(emptySet())
+    val refreshingPages: StateFlow<Set<String>> = _refreshingPages.asStateFlow()
 
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
@@ -45,9 +65,21 @@ class WeatherViewModel @JvmOverloads constructor(
     private val _searchState = MutableStateFlow<LocationSearchState>(LocationSearchState.Idle)
     val searchState: StateFlow<LocationSearchState> = _searchState.asStateFlow()
 
+    private var navSequence = 0L
+    private val _navigationEvent = MutableStateFlow(
+        PageNavigationEvent(
+            targetKey = pageKeyFor(_selectedCustomLocation.value),
+            seq = 0L,
+            snapImmediately = false
+        )
+    )
+    val navigationEvent: StateFlow<PageNavigationEvent> = _navigationEvent.asStateFlow()
+
     private val pageJobs = mutableMapOf<String, Job>()
     private val pageFetchTimestamps = mutableMapOf<String, Long>()
     private var searchJob: Job? = null
+    @Volatile
+    private var hasHydratedCache = false
 
     fun hasLocationPermission(): Boolean = locationClient.hasLocationPermission()
 
@@ -72,44 +104,68 @@ class WeatherViewModel @JvmOverloads constructor(
     }
 
     init {
-        hydrateCachedPages()
-        val activeLoc = _selectedCustomLocation.value
-        val activeKey = pageKeyFor(activeLoc)
-        val initialCached = _pageStates.value[activeKey]
-        if (initialCached is WeatherUiState.Success) {
-            _uiState.value = initialCached
-            fetchPageWeather(location = activeLoc, showInitialLoading = false)
-        } else {
-            _uiState.value = WeatherUiState.Loading
-            fetchPageWeather(location = activeLoc, showInitialLoading = true)
+        // Hydrate multi-city disk cache off the main thread in a single JSON parse
+        vmScope.launch {
+            val hydrated = withContext(ioDispatcher) {
+                loadHydratedCachedPages()
+            }
+            if (hydrated.isNotEmpty()) {
+                _pageStates.update { existing ->
+                    val merged = existing.toMutableMap()
+                    hydrated.forEach { (k, v) ->
+                        if (merged[k] !is WeatherUiState.Success) {
+                            merged[k] = v
+                        }
+                    }
+                    merged
+                }
+            }
+            hasHydratedCache = true
+            val activeLoc = _selectedCustomLocation.value
+            val activeKey = pageKeyFor(activeLoc)
+            val initialCached = _pageStates.value[activeKey]
+            if (initialCached is WeatherUiState.Success) {
+                _uiState.value = initialCached
+                if (pageJobs[activeKey]?.isActive != true) {
+                    fetchPageWeather(location = activeLoc, showInitialLoading = false)
+                }
+            } else {
+                if (pageJobs[activeKey]?.isActive != true) {
+                    _uiState.value = WeatherUiState.Loading
+                    fetchPageWeather(location = activeLoc, showInitialLoading = true)
+                }
+            }
+            prefetchAdjacentPages(activePageIndex())
         }
-        startPolling()
+        if (enablePolling) {
+            startPolling()
+        }
     }
 
-    private fun hydrateCachedPages() {
+    private fun loadHydratedCachedPages(): Map<String, WeatherUiState> {
+        val allCached = repository.getAllCachedWeatherEntries()
+        if (allCached.isEmpty()) return emptyMap()
         val initialMap = mutableMapOf<String, WeatherUiState>()
         val lastCoords = locationClient.getCachedCoordinates()
-        val gpsCached = repository.getCachedWeatherForLocation(
+        val gpsCacheKey = repository.locationCacheKeyFor(
             location = null,
             gpsLatitude = lastCoords?.latitude,
             gpsLongitude = lastCoords?.longitude
         )
-        if (gpsCached != null) {
-            initialMap[PAGE_KEY_GPS] = WeatherUiState.Success(gpsCached)
+        if (gpsCacheKey != null) {
+            allCached[gpsCacheKey]?.let { initialMap[PAGE_KEY_GPS] = WeatherUiState.Success(it) }
         }
         _savedLocations.value.forEach { loc ->
-            val cached = repository.getCachedWeatherForLocation(location = loc)
-            if (cached != null) {
-                initialMap[pageKeyFor(loc)] = WeatherUiState.Success(cached)
+            val cacheKey = repository.locationCacheKeyFor(location = loc)
+            if (cacheKey != null) {
+                allCached[cacheKey]?.let { initialMap[pageKeyFor(loc)] = WeatherUiState.Success(it) }
             }
         }
-        if (initialMap.isNotEmpty()) {
-            _pageStates.value = initialMap
-        }
+        return initialMap
     }
 
     private fun startPolling() {
-        viewModelScope.launch {
+        vmScope.launch {
             while (true) {
                 delay(15 * 60 * 1000L)
                 val activeLoc = _selectedCustomLocation.value
@@ -119,6 +175,20 @@ class WeatherViewModel @JvmOverloads constructor(
                 }
             }
         }
+    }
+
+    private fun emitNavigationEvent(target: SavedLocation?, snapImmediately: Boolean) {
+        navSequence += 1L
+        _navigationEvent.value = PageNavigationEvent(
+            targetKey = pageKeyFor(target),
+            seq = navSequence,
+            snapImmediately = snapImmediately
+        )
+    }
+
+    private fun syncActiveRefreshingState() {
+        val activeKey = pageKeyFor(_selectedCustomLocation.value)
+        _isRefreshing.value = activeKey in _refreshingPages.value
     }
 
     fun loadWeatherData() {
@@ -135,13 +205,17 @@ class WeatherViewModel @JvmOverloads constructor(
     }
 
     fun refresh() {
-        val activeLoc = _selectedCustomLocation.value
-        val key = pageKeyFor(activeLoc)
+        refreshPage(_selectedCustomLocation.value)
+    }
+
+    fun refreshPage(location: SavedLocation?) {
+        val target = location?.takeUnless { it.isCurrentGps }
+        val key = pageKeyFor(target)
         pageJobs[key]?.cancel()
         fetchPageWeather(
-            location = activeLoc,
+            location = target,
             showInitialLoading = false,
-            forceFreshLocation = activeLoc == null
+            forceFreshLocation = target == null
         )
     }
 
@@ -171,14 +245,16 @@ class WeatherViewModel @JvmOverloads constructor(
             return
         }
         _searchState.value = LocationSearchState.Searching
-        searchJob = viewModelScope.launch {
+        searchJob = vmScope.launch {
             delay(250L)
             _searchState.value = repository.searchPlaces(trimmed)
         }
     }
 
     /**
-     * Called when the user swipes horizontally to a page index (0 = GPS, 1..N = saved places).
+     * Called ONLY when the user finishes a manual horizontal swipe to [pageIndex]
+     * (0 = GPS, 1..N = saved places). Never emits a programmatic PageNavigationEvent,
+     * preventing fast consecutive swipes from snapping backwards mid-drag.
      */
     fun onSwipeToPage(pageIndex: Int) {
         val target = locationForPage(pageIndex)
@@ -188,14 +264,44 @@ class WeatherViewModel @JvmOverloads constructor(
         } else {
             current != null && LocationSearchEngine.isSamePlace(current, target)
         }
-        if (alreadyActive) return
+        if (alreadyActive) {
+            syncActiveRefreshingState()
+            prefetchAdjacentPages(pageIndex)
+            return
+        }
 
         _selectedCustomLocation.value = target
         repository.setSelectedCustomLocation(target)
         activatePageStateAndFetchIfNeeded(target, forceFreshGps = false)
+        prefetchAdjacentPages(pageIndex)
     }
 
-    fun selectLocation(location: SavedLocation?) {
+    /**
+     * Called when the user explicitly taps a page indicator dot.
+     */
+    fun selectPageIndex(pageIndex: Int) {
+        val target = locationForPage(pageIndex)
+        val current = _selectedCustomLocation.value
+        val alreadyActive = if (target == null) {
+            current == null
+        } else {
+            current != null && LocationSearchEngine.isSamePlace(current, target)
+        }
+        if (!alreadyActive) {
+            _selectedCustomLocation.value = target
+            repository.setSelectedCustomLocation(target)
+            activatePageStateAndFetchIfNeeded(target, forceFreshGps = false)
+        } else {
+            syncActiveRefreshingState()
+        }
+        emitNavigationEvent(target, snapImmediately = false)
+        prefetchAdjacentPages(pageIndex)
+    }
+
+    fun selectLocation(
+        location: SavedLocation?,
+        snapImmediately: Boolean = false
+    ) {
         val normalized = location?.takeUnless { it.isCurrentGps }
         var effectiveLocation = normalized
         if (normalized != null) {
@@ -212,22 +318,62 @@ class WeatherViewModel @JvmOverloads constructor(
         _selectedCustomLocation.value = effectiveLocation
         repository.setSelectedCustomLocation(effectiveLocation)
         _searchState.value = LocationSearchState.Idle
+        emitNavigationEvent(effectiveLocation, snapImmediately = snapImmediately)
         activatePageStateAndFetchIfNeeded(effectiveLocation, forceFreshGps = effectiveLocation == null)
+        prefetchAdjacentPages(activePageIndex(effectiveLocation, _savedLocations.value))
     }
 
     fun removeSavedLocation(location: SavedLocation) {
-        val removedKey = pageKeyFor(location)
-        pageJobs.remove(removedKey)?.cancel()
-        pageFetchTimestamps.remove(removedKey)
-        _pageStates.update { it - removedKey }
+        val currentSaved = _savedLocations.value
+        val removedMatches = currentSaved.filter { LocationSearchEngine.isSamePlace(it, location) }
+        val removedKeys = buildSet {
+            add(pageKeyFor(location))
+            removedMatches.forEach { add(pageKeyFor(it)) }
+        }
+        removedKeys.forEach { key ->
+            pageJobs.remove(key)?.cancel()
+            pageFetchTimestamps.remove(key)
+        }
+        _refreshingPages.update { it - removedKeys }
+        _pageStates.update { it - removedKeys }
 
-        val updated = _savedLocations.value.filterNot { LocationSearchEngine.isSamePlace(it, location) }
+        val updated = currentSaved.filterNot { LocationSearchEngine.isSamePlace(it, location) }
         _savedLocations.value = updated
         repository.saveLocations(updated)
 
         val activeCustom = _selectedCustomLocation.value
         if (activeCustom != null && LocationSearchEngine.isSamePlace(activeCustom, location)) {
-            selectLocation(null)
+            selectLocation(null, snapImmediately = true)
+        } else {
+            syncActiveRefreshingState()
+            prefetchAdjacentPages(activePageIndex())
+        }
+    }
+
+    /**
+     * Silently warms immediate neighbor pages (centerIndex ± 1) so horizontal swiping
+     * lands on real weather data instead of skeleton placeholders, without triggering
+     * pull-to-refresh spinners or overwriting the active widget cache slot.
+     */
+    fun prefetchAdjacentPages(centerIndex: Int) {
+        if (!hasHydratedCache) return
+        val saved = _savedLocations.value
+        val maxPageIndex = saved.size
+        listOf(centerIndex - 1, centerIndex + 1).forEach { neighborIdx ->
+            if (neighborIdx !in 0..maxPageIndex) return@forEach
+            val neighborLoc = locationForPage(neighborIdx, saved)
+            val key = pageKeyFor(neighborLoc)
+            if (_pageStates.value[key] is WeatherUiState.Success) return@forEach
+            if (pageJobs[key]?.isActive == true) return@forEach
+            if (neighborLoc == null && !hasLocationPermission() && locationClient.getCachedCoordinates() == null) {
+                return@forEach
+            }
+            fetchPageWeather(
+                location = neighborLoc,
+                showInitialLoading = false,
+                forceFreshLocation = false,
+                isPrefetch = true
+            )
         }
     }
 
@@ -236,69 +382,112 @@ class WeatherViewModel @JvmOverloads constructor(
         forceFreshGps: Boolean
     ) {
         val key = pageKeyFor(target)
-        val existingState = _pageStates.value[key] ?: run {
-            val lastCoords = if (target == null) locationClient.getCachedCoordinates() else null
-            val diskCached = repository.getCachedWeatherForLocation(
-                location = target,
-                gpsLatitude = lastCoords?.latitude,
-                gpsLongitude = lastCoords?.longitude
-            )
-            diskCached?.let { WeatherUiState.Success(it) }?.also { state ->
-                _pageStates.update { it + (key to state) }
-            }
-        }
+        syncActiveRefreshingState()
+        val existingState = _pageStates.value[key]
 
         if (existingState is WeatherUiState.Success) {
             _uiState.value = existingState
+            // Always keep KEY_CACHED_WEATHER and home widgets synced to the newly active city,
+            // even when within the 5-minute swipe refresh throttle window.
+            vmScope.launch(ioDispatcher) {
+                repository.syncActiveWidgetCache(
+                    data = existingState.data,
+                    targetLocation = target,
+                    shouldUpdate = { pageKeyFor(_selectedCustomLocation.value) == key }
+                )
+            }
+            com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
+                context = getApplication(),
+                preloadedData = existingState.data
+            )
+
             // Refresh silently if older than 5 minutes so swiping back and forth doesn't hammer APIs
             val lastFetch = pageFetchTimestamps[key] ?: 0L
             val ageMs = System.currentTimeMillis() - lastFetch
-            if (forceFreshGps || lastFetch == 0L || ageMs > SWIPE_REFRESH_THROTTLE_MS) {
+            if ((forceFreshGps || lastFetch == 0L || ageMs > SWIPE_REFRESH_THROTTLE_MS) &&
+                (forceFreshGps || pageJobs[key]?.isActive != true)
+            ) {
                 fetchPageWeather(
                     location = target,
                     showInitialLoading = false,
                     forceFreshLocation = forceFreshGps
                 )
-            } else {
-                // Keep home widgets synced to the newly selected active city
-                com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
-                    context = getApplication(),
-                    preloadedData = existingState.data
-                )
             }
         } else {
             _uiState.value = WeatherUiState.Loading
             _pageStates.update { it + (key to WeatherUiState.Loading) }
-            fetchPageWeather(
-                location = target,
-                showInitialLoading = true,
-                forceFreshLocation = forceFreshGps
-            )
+            if (forceFreshGps || pageJobs[key]?.isActive != true) {
+                fetchPageWeather(
+                    location = target,
+                    showInitialLoading = true,
+                    forceFreshLocation = forceFreshGps,
+                    checkDiskCacheFirst = true
+                )
+            }
         }
     }
 
     private fun fetchPageWeather(
         location: SavedLocation?,
         showInitialLoading: Boolean = false,
-        forceFreshLocation: Boolean = false
+        forceFreshLocation: Boolean = false,
+        isPrefetch: Boolean = false,
+        checkDiskCacheFirst: Boolean = false
     ) {
         val key = pageKeyFor(location)
         val isActivePage = { pageKeyFor(_selectedCustomLocation.value) == key }
 
         pageJobs[key]?.cancel()
-        pageJobs[key] = viewModelScope.launch {
-            val existing = _pageStates.value[key]
-            if (showInitialLoading || existing !is WeatherUiState.Success) {
-                _pageStates.update { it + (key to WeatherUiState.Loading) }
-                if (isActivePage()) {
-                    _uiState.value = WeatherUiState.Loading
-                    _isRefreshing.value = false
-                }
-            } else if (isActivePage()) {
-                _isRefreshing.value = true
-            }
-
+        lateinit var myJob: Job
+        myJob = vmScope.launch(start = CoroutineStart.LAZY) {
             try {
+                var loadedFromDisk = false
+                if (isPrefetch || checkDiskCacheFirst) {
+                    val diskCached = withContext(ioDispatcher) {
+                        val lastCoords = if (location == null) locationClient.getCachedCoordinates() else null
+                        repository.getCachedWeatherForLocation(
+                            location = location,
+                            gpsLatitude = lastCoords?.latitude,
+                            gpsLongitude = lastCoords?.longitude
+                        )
+                    }
+                    if (diskCached != null) {
+                        loadedFromDisk = true
+                        val cachedState = WeatherUiState.Success(diskCached)
+                        _pageStates.update { it + (key to cachedState) }
+                        if (isActivePage()) {
+                            _uiState.value = cachedState
+                            withContext(ioDispatcher) {
+                                repository.syncActiveWidgetCache(
+                                    data = diskCached,
+                                    targetLocation = location,
+                                    shouldUpdate = isActivePage
+                                )
+                            }
+                            com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
+                                context = getApplication(),
+                                preloadedData = diskCached
+                            )
+                        }
+                        if (isPrefetch) return@launch
+                    }
+                }
+
+                val existing = _pageStates.value[key]
+                if (!isPrefetch) {
+                    if ((showInitialLoading && !loadedFromDisk) || existing !is WeatherUiState.Success) {
+                        _pageStates.update { it + (key to WeatherUiState.Loading) }
+                        _refreshingPages.update { it - key }
+                        if (isActivePage()) {
+                            _uiState.value = WeatherUiState.Loading
+                        }
+                        syncActiveRefreshingState()
+                    } else {
+                        _refreshingPages.update { it + key }
+                        syncActiveRefreshingState()
+                    }
+                }
+
                 val data = if (location != null && !location.isCurrentGps) {
                     repository.getWeatherData(
                         latitude = location.latitude,
@@ -306,7 +495,7 @@ class WeatherViewModel @JvmOverloads constructor(
                         resolvedLocationName = location.name,
                         fallbackTimezone = location.timezone,
                         targetLocation = location,
-                        updateActiveCacheSlot = isActivePage()
+                        shouldUpdateActiveCacheSlot = isActivePage
                     )
                 } else {
                     val coords = locationClient.fetchLocation(forceFresh = forceFreshLocation)
@@ -317,7 +506,7 @@ class WeatherViewModel @JvmOverloads constructor(
                         resolvedLocationName = coords.locationName,
                         altitude = coords.altitude,
                         targetLocation = null,
-                        updateActiveCacheSlot = isActivePage()
+                        shouldUpdateActiveCacheSlot = isActivePage
                     )
                 }
 
@@ -362,13 +551,15 @@ class WeatherViewModel @JvmOverloads constructor(
             } catch (e: Exception) {
                 Log.e("WeatherViewModel", "Error loading weather data for $key", e)
                 val current = _pageStates.value[key]
-                if (current !is WeatherUiState.Success) {
-                    val lastCoords = if (location == null) locationClient.getCachedCoordinates() else null
-                    val fallback = repository.getCachedWeatherForLocation(
-                        location = location,
-                        gpsLatitude = lastCoords?.latitude,
-                        gpsLongitude = lastCoords?.longitude
-                    )
+                if (current !is WeatherUiState.Success && (!isPrefetch || isActivePage())) {
+                    val fallback = withContext(ioDispatcher) {
+                        val lastCoords = if (location == null) locationClient.getCachedCoordinates() else null
+                        repository.getCachedWeatherForLocation(
+                            location = location,
+                            gpsLatitude = lastCoords?.latitude,
+                            gpsLongitude = lastCoords?.longitude
+                        )
+                    }
                     val resolvedState = if (fallback != null) {
                         WeatherUiState.Success(fallback)
                     } else {
@@ -380,11 +571,14 @@ class WeatherViewModel @JvmOverloads constructor(
                     }
                 }
             } finally {
-                if (isActivePage()) {
-                    _isRefreshing.value = false
+                if (pageJobs[key] === myJob) {
+                    _refreshingPages.update { it - key }
+                    syncActiveRefreshingState()
                 }
             }
         }
+        pageJobs[key] = myJob
+        myJob.start()
     }
 
     companion object {

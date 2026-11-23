@@ -75,8 +75,55 @@ data class OfficialWeatherAlert(
     val description: String = "",
     val instruction: String = "",
     val expiresLabel: String = "",
-    val severityLabel: String = ""
+    val severityLabel: String = "",
+    val expiresEpochMs: Long? = null
 )
+
+data class LiveSatelliteStormObservation(
+    val lightningNearby: Boolean = false,
+    val nearestLightningKm: Int? = null,
+    val lightningDirection: String? = null,
+    val activeStormPhase: String? = null,
+    val stormRainRateMmH: Double? = null,
+    val stormMoveSpeedKmH: Int? = null,
+    val stormMoveDirection: String? = null,
+    val observedRainRateMmH: Double? = null,
+    val observationTimeIso: String? = null,
+    val sourceLabel: String = "Meteosat Live"
+) {
+    val hasActiveStormOrLightning: Boolean
+        get() = lightningNearby || !activeStormPhase.isNullOrBlank()
+
+    val hasObservedRain: Boolean
+        get() = (observedRainRateMmH ?: 0.0) >= 0.3 || (stormRainRateMmH ?: 0.0) >= 0.5
+
+    val effectiveRainRateMmH: Double
+        get() = maxOf(observedRainRateMmH ?: 0.0, stormRainRateMmH ?: 0.0)
+
+    fun formatCompactSummary(): String? {
+        val parts = mutableListOf<String>()
+        if (lightningNearby) {
+            val locText = when {
+                nearestLightningKm == null || nearestLightningKm <= 4 -> "overhead"
+                !lightningDirection.isNullOrBlank() -> "~${nearestLightningKm} km $lightningDirection"
+                else -> "~${nearestLightningKm} km away"
+            }
+            parts.add("Live lightning $locText")
+        }
+        if (!activeStormPhase.isNullOrBlank()) {
+            val movePart = if (stormMoveSpeedKmH != null && !stormMoveDirection.isNullOrBlank()) {
+                " moving $stormMoveDirection at $stormMoveSpeedKmH km/h"
+            } else {
+                ""
+            }
+            parts.add("${activeStormPhase} storm cell$movePart")
+        }
+        if (parts.isEmpty() && (observedRainRateMmH ?: 0.0) >= 0.3) {
+            parts.add(String.format(java.util.Locale.US, "Satellite rain %.1f mm/h", observedRainRateMmH))
+        }
+        return parts.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+    }
+}
 
 data class SevereAlertInfo(
     val riskLevel: SeverityRiskLevel,
@@ -87,7 +134,8 @@ data class SevereAlertInfo(
     val peakHourLabel: String? = null,
     val hourlyStormProbabilities: List<Int> = emptyList(),
     val officialAlerts: List<OfficialWeatherAlert> = emptyList(),
-    val sourceLabel: String? = null
+    val sourceLabel: String? = null,
+    val liveSatellite: LiveSatelliteStormObservation? = null
 )
 
 data class HourlyItem(
@@ -215,5 +263,6 @@ data class WeatherDashboardData(
     val ensemble: EnsembleDispersion? = null,
     val timezone: String? = null,
     val latitude: Double? = null,
-    val longitude: Double? = null
+    val longitude: Double? = null,
+    val liveSatellite: LiveSatelliteStormObservation? = null
 )

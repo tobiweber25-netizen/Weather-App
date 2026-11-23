@@ -632,11 +632,26 @@ object WeatherNotificationScheduler {
         }
     }
 
-    internal fun isForToday(data: WeatherDashboardData): Boolean {
+    internal fun isForToday(
+        data: WeatherDashboardData,
+        referenceNow: java.time.ZonedDateTime? = null
+    ): Boolean {
         val first = data.dailyList.firstOrNull()?.dateText ?: return false
         val zone = WeatherMapper.resolveZoneId(data.timezone)
-        val today = java.time.LocalDate.now(zone)
-        return first == "${today.monthValue}/${today.dayOfMonth}"
+        val nowZoned = referenceNow?.withZoneSameInstant(zone) ?: java.time.ZonedDateTime.now(zone)
+        val today = nowZoned.toLocalDate()
+        val todayStr = "${today.monthValue}/${today.dayOfMonth}"
+        if (first == todayStr) return true
+        // Between 00:00 and 06:59 local time, Google's 07:00–07:00 meteorological day may still
+        // place yesterday at index 0 with today immediately following.
+        if (nowZoned.hour < 7) {
+            val yesterday = today.minusDays(1)
+            val yesterdayStr = "${yesterday.monthValue}/${yesterday.dayOfMonth}"
+            if (first == yesterdayStr && data.dailyList.any { it.dateText == todayStr }) {
+                return true
+            }
+        }
+        return false
     }
 
     fun triggerTestNotification(

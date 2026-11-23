@@ -6,10 +6,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Icon
@@ -27,6 +30,7 @@ import com.google.weatherapp.theme.*
 @Composable
 fun SevereWeatherAlertPill(
     alert: SevereAlertInfo,
+    onOpenStormMap: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     if (!alert.isVisible) return
@@ -120,14 +124,21 @@ fun SevereWeatherAlertPill(
                         maxLines = 1
                     )
                     val topOfficial = alert.officialAlerts.firstOrNull()
-                    val headerMeta = if (topOfficial != null && alert.sourceLabel != null) {
-                        buildString {
+                    val isOfficialHeadline = topOfficial != null &&
+                        !alert.sourceLabel.isNullOrBlank() &&
+                        alert.sourceLabel != alert.liveSatellite?.sourceLabel
+                    val liveSatSummary = alert.liveSatellite
+                        ?.takeIf { it.hasActiveStormOrLightning }
+                        ?.formatCompactSummary()
+                    val headerMeta = when {
+                        !liveSatSummary.isNullOrBlank() && !isOfficialHeadline ->
+                            "$liveSatSummary · ${alert.liveSatellite?.sourceLabel ?: "Meteosat Live"}"
+                        isOfficialHeadline -> buildString {
                             append(alert.sourceLabel)
-                            if (topOfficial.areaName.isNotBlank()) append(" · ${topOfficial.areaName}")
+                            if (topOfficial!!.areaName.isNotBlank()) append(" · ${topOfficial.areaName}")
                             if (topOfficial.expiresLabel.isNotBlank()) append(" · Until ${topOfficial.expiresLabel}")
                         }
-                    } else {
-                        "24h Storm Probability: ${alert.thunderstormProbability}%$peakSuffix"
+                        else -> "24h Storm Probability: ${alert.thunderstormProbability}%$peakSuffix"
                     }
                     Text(
                         text = headerMeta,
@@ -159,16 +170,74 @@ fun SevereWeatherAlertPill(
                     color = contentColor
                 )
 
-                val topInstruction = alert.officialAlerts.firstOrNull()?.instruction
-                if (!topInstruction.isNullOrBlank()) {
+                val topOfficial = alert.officialAlerts.firstOrNull()
+                val isOfficialHeadline = topOfficial != null &&
+                    !alert.sourceLabel.isNullOrBlank() &&
+                    alert.sourceLabel != alert.liveSatellite?.sourceLabel
+                val liveSatSummary = alert.liveSatellite
+                    ?.takeIf { it.hasActiveStormOrLightning }
+                    ?.formatCompactSummary()
+                if (!liveSatSummary.isNullOrBlank() && isOfficialHeadline) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(CornerTokens.Small))
+                            .background(GlassPillHighlight)
+                            .padding(horizontal = SpacingTokens.Small, vertical = SpacingTokens.ExtraSmall)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ElectricBolt,
+                            contentDescription = null,
+                            tint = MapHudLightningAccent,
+                            modifier = Modifier.size(IconSizeTokens.Micro)
+                        )
+                        Text(
+                            text = "$liveSatSummary · ${alert.liveSatellite?.sourceLabel ?: "Meteosat Live"}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = contentColor
+                        )
+                    }
+                }
+                if (isOfficialHeadline) {
+                    val topInstruction = topOfficial!!.instruction
+                    if (topInstruction.isNotBlank()) {
+                        Text(
+                            text = "SAFETY GUIDANCE",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = contentColor.copy(alpha = 0.85f)
+                        )
+                        Text(
+                            text = topInstruction,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = contentColor.copy(alpha = 0.92f)
+                        )
+                    }
+                } else if (topOfficial != null) {
+                    // Storm tracker won the headline, but a lower-severity official advisory is also active:
+                    // keep it clearly attributed so it is never conflated with the storm headline.
+                    val secondarySourceLabel = topOfficial.source.trim()
                     Text(
-                        text = "SAFETY GUIDANCE",
+                        text = if (secondarySourceLabel.isNotBlank()) {
+                            "ALSO ACTIVE · ${secondarySourceLabel.uppercase(java.util.Locale.ROOT)}"
+                        } else {
+                            "ALSO ACTIVE"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         fontWeight = FontWeight.SemiBold,
                         color = contentColor.copy(alpha = 0.85f)
                     )
+                    val secondarySummary = buildString {
+                        append(topOfficial.title)
+                        if (topOfficial.areaName.isNotBlank()) append(" · ${topOfficial.areaName}")
+                        if (topOfficial.expiresLabel.isNotBlank()) append(" · Until ${topOfficial.expiresLabel}")
+                        if (topOfficial.description.isNotBlank()) append("\n${topOfficial.description}")
+                        if (topOfficial.instruction.isNotBlank()) append("\n${topOfficial.instruction}")
+                    }
                     Text(
-                        text = topInstruction,
+                        text = secondarySummary,
                         style = MaterialTheme.typography.bodySmall,
                         color = contentColor.copy(alpha = 0.92f)
                     )
@@ -190,6 +259,38 @@ fun SevereWeatherAlertPill(
                             .height(ComponentTokens.AlertSparklineHeight)
                             .padding(vertical = SpacingTokens.ExtraSmall)
                     )
+                }
+
+                if (onOpenStormMap != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
+                        modifier = Modifier
+                            .padding(top = SpacingTokens.ExtraSmall)
+                            .clip(RoundedCornerShape(CornerTokens.Pill))
+                            .background(GlassPillHighlight)
+                            .clickable(onClick = onOpenStormMap)
+                            .padding(horizontal = SpacingTokens.Medium, vertical = SpacingTokens.Small)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Map,
+                            contentDescription = null,
+                            tint = SunCoreGold,
+                            modifier = Modifier.size(IconSizeTokens.Micro)
+                        )
+                        Text(
+                            text = "View Storm & Lightning Map",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = contentColor
+                        )
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            contentDescription = null,
+                            tint = contentColor,
+                            modifier = Modifier.size(IconSizeTokens.Micro)
+                        )
+                    }
                 }
             }
         }

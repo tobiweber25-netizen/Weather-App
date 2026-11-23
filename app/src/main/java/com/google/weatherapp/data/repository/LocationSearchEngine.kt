@@ -20,26 +20,69 @@ import kotlin.math.sqrt
 internal object LocationSearchEngine {
 
     private val COORD_REGEX = Regex(
-        """^\s*([+-]?\d{1,2}(?:\.\d+)?)\s*°?\s*([NSns])?\s*[,\s]\s*([+-]?\d{1,3}(?:\.\d+)?)\s*°?\s*([EWew])?\s*$"""
+        """^\s*([+-]?\d{1,2}(?:\.\d+)?)\s*°?\s*([NSns])?(?:\s*,\s*|\s+)([+-]?\d{1,3}(?:\.\d+)?)\s*°?\s*([EWew])?\s*$"""
     )
 
     private val PREFERRED_PHOTON_TYPES = setOf(
         "city", "town", "village", "suburb", "district", "locality",
         "county", "state", "country", "borough", "quarter", "neighbourhood",
-        "hamlet", "island", "other"
+        "hamlet", "island", "postcode"
     )
 
-    private val PREFERRED_OSM_KEYS = setOf(
-        "place", "boundary", "aeroway", "leisure", "natural", "tourism", "landuse"
+    private val RESIDENTIAL_PLACE_TYPES = setOf(
+        "city", "town", "village", "suburb", "district", "borough",
+        "quarter", "neighbourhood", "hamlet"
+    )
+
+    private val ALLOWED_BOUNDARY_VALUES = setOf(
+        "administrative", "national_park", "protected_area", "postal_code"
+    )
+
+    private val ALLOWED_NATURAL_VALUES = setOf(
+        "peak", "mountain_range", "volcano", "beach", "bay", "valley",
+        "glacier", "peninsula", "cape", "island"
+    )
+
+    private val ALLOWED_TOURISM_VALUES = setOf(
+        "resort", "ski_resort"
+    )
+
+    private val ALLOWED_AMENITY_VALUES = setOf(
+        "university", "ferry_terminal"
     )
 
     private val ALLOWED_OSM_VALUES = setOf(
         "city", "town", "village", "suburb", "quarter", "neighbourhood", "borough",
         "hamlet", "isolated_dwelling", "locality", "island", "islet", "archipelago",
         "municipality", "county", "state", "region", "province", "administrative",
-        "aerodrome", "international", "national_park", "park", "nature_reserve",
+        "aerodrome", "national_park", "nature_reserve",
         "peak", "mountain_range", "volcano", "beach", "bay", "valley", "glacier",
         "ski_resort", "resort", "postcode"
+    )
+
+    private val REGION_ABBREVIATIONS = mapOf(
+        // United States
+        "al" to "alabama", "ak" to "alaska", "az" to "arizona", "ar" to "arkansas",
+        "ca" to "california", "co" to "colorado", "ct" to "connecticut", "de" to "delaware",
+        "fl" to "florida", "ga" to "georgia", "hi" to "hawaii", "id" to "idaho",
+        "il" to "illinois", "in" to "indiana", "ia" to "iowa", "ks" to "kansas",
+        "ky" to "kentucky", "la" to "louisiana", "me" to "maine", "md" to "maryland",
+        "ma" to "massachusetts", "mi" to "michigan", "mn" to "minnesota", "ms" to "mississippi",
+        "mo" to "missouri", "mt" to "montana", "ne" to "nebraska", "nv" to "nevada",
+        "nh" to "new hampshire", "nj" to "new jersey", "nm" to "new mexico", "ny" to "new york",
+        "nc" to "north carolina", "nd" to "north dakota", "oh" to "ohio", "ok" to "oklahoma",
+        "or" to "oregon", "pa" to "pennsylvania", "ri" to "rhode island", "sc" to "south carolina",
+        "sd" to "south dakota", "tn" to "tennessee", "tx" to "texas", "ut" to "utah",
+        "vt" to "vermont", "va" to "virginia", "wa" to "washington", "wv" to "west virginia",
+        "wi" to "wisconsin", "wy" to "wyoming", "dc" to "district of columbia",
+        // Canada
+        "ab" to "alberta", "bc" to "british columbia", "mb" to "manitoba", "nb" to "new brunswick",
+        "nl" to "newfoundland", "ns" to "nova scotia", "nt" to "northwest territories",
+        "nu" to "nunavut", "on" to "ontario", "pe" to "prince edward island", "qc" to "quebec",
+        "sk" to "saskatchewan", "yt" to "yukon",
+        // Australia
+        "nsw" to "new south wales", "qld" to "queensland", "sa" to "south australia",
+        "tas" to "tasmania", "vic" to "victoria", "act" to "australian capital territory"
     )
 
     /**
@@ -78,10 +121,7 @@ internal object LocationSearchEngine {
         val county = props.county?.trim()?.takeIf { it.isNotBlank() }
         val state = props.state?.trim()?.takeIf { it.isNotBlank() }
 
-        val isUsefulPlaceName = name != null && (
-            props.osmKey in PREFERRED_OSM_KEYS ||
-                props.type in PREFERRED_PHOTON_TYPES
-            )
+        val isUsefulPlaceName = name != null && isUsefulPhotonFeature(props)
 
         return when {
             district != null && city != null && !district.equals(city, ignoreCase = true) ->
@@ -145,8 +185,8 @@ internal object LocationSearchEngine {
         }
 
         // 2. Photon (OpenStreetMap) candidates — suburbs, neighborhoods, landmarks, postal codes, "Area, City"
+        // Never re-admit commercial POIs (restaurants, pubs, shops, offices, hairdressers) when filtered out.
         val filteredPhoton = photonFeatures.filter { isUsefulPhotonFeature(it.properties) }
-            .ifEmpty { photonFeatures }
 
         filteredPhoton.forEachIndexed { idx, feature ->
             val coords = feature.geometry?.coordinates
@@ -210,9 +250,13 @@ internal object LocationSearchEngine {
     }
 
     internal fun isSamePlace(a: SavedLocation, b: SavedLocation): Boolean {
+        if (a.isCurrentGps != b.isCurrentGps) return false
         val distKm = distanceKm(a.latitude, a.longitude, b.latitude, b.longitude)
         if (distKm <= 1.0) return true
-        val sameName = normalizeText(a.name) == normalizeText(b.name)
+        val normA = normalizeText(a.name)
+        val normB = normalizeText(b.name)
+        if (normA.isBlank() || normB.isBlank()) return false
+        val sameName = normA == normB
         if (sameName && distKm <= 15.0) return true
         return sameName &&
             normalizeText(a.country) == normalizeText(b.country) &&
@@ -235,17 +279,30 @@ internal object LocationSearchEngine {
         if (distKm <= 1.5) return true
         val normA = normalizeText(a.name)
         val normB = normalizeText(b.name)
+        if (normA.isBlank() || normB.isBlank()) return false
         return (normA == normB || normA.startsWith(normB) || normB.startsWith(normA)) && distKm <= 12.0
     }
 
-    private fun isUsefulPhotonFeature(props: PhotonProperties?): Boolean {
+    internal fun isUsefulPhotonFeature(props: PhotonProperties?): Boolean {
         if (props == null) return false
-        val key = props.osmKey?.lowercase(Locale.US).orEmpty()
-        val value = props.osmValue?.lowercase(Locale.US).orEmpty()
-        val type = props.type?.lowercase(Locale.US).orEmpty()
-        if (key in setOf("highway", "shop", "office", "building", "railway")) return false
-        if (key == "amenity" && value !in setOf("university", "ferry_terminal")) return false
-        return key in PREFERRED_OSM_KEYS || value in ALLOWED_OSM_VALUES || type in PREFERRED_PHOTON_TYPES || !props.postcode.isNullOrBlank()
+        val key = props.osmKey?.trim()?.lowercase(Locale.ROOT).orEmpty()
+        val value = props.osmValue?.trim()?.lowercase(Locale.ROOT).orEmpty()
+        val type = props.type?.trim()?.lowercase(Locale.ROOT).orEmpty()
+        val isPostcodeEntry = !props.postcode.isNullOrBlank() &&
+            (type == "postcode" || value == "postcode" || props.name.isNullOrBlank())
+
+        return when (key) {
+            "place" -> value != "plot"
+            "boundary" -> value in ALLOWED_BOUNDARY_VALUES || (value.isBlank() && type in PREFERRED_PHOTON_TYPES)
+            "aeroway" -> value == "aerodrome"
+            "natural" -> value in ALLOWED_NATURAL_VALUES
+            "leisure" -> value == "nature_reserve"
+            "tourism" -> value in ALLOWED_TOURISM_VALUES
+            "landuse" -> value == "residential" && type in RESIDENTIAL_PLACE_TYPES
+            "amenity" -> value in ALLOWED_AMENITY_VALUES
+            "" -> value in ALLOWED_OSM_VALUES || type in PREFERRED_PHOTON_TYPES || isPostcodeEntry
+            else -> false
+        }
     }
 
     private fun resolvePhotonDisplayName(props: PhotonProperties): String? {
@@ -270,7 +327,27 @@ internal object LocationSearchEngine {
         if (primaryQuery.isBlank()) return 0.0
         val normName = normalizeText(location.name)
         val normContext = normalizeText("${location.adminArea} ${location.country} ${location.countryCode.orEmpty()}")
-        var score = when {
+        val contextTokens = normContext.split(" ").filter { it.isNotBlank() }
+
+        fun matchesContextToken(tok: String): Boolean {
+            val expandedRegion = REGION_ABBREVIATIONS[tok]
+            if (expandedRegion != null && (
+                    normContext == expandedRegion ||
+                        normContext.startsWith("$expandedRegion ") ||
+                        normContext.endsWith(" $expandedRegion") ||
+                        normContext.contains(" $expandedRegion ")
+                    )
+            ) {
+                return true
+            }
+            if (tok.length <= 2) {
+                return contextTokens.any { it == tok }
+            }
+            return contextTokens.any { it == tok || it.startsWith(tok) } || normContext.contains(tok)
+        }
+
+        var bestScore = when {
+            normName.isBlank() -> 0.0
             normName == primaryQuery -> 60.0
             normName.startsWith(primaryQuery) -> 42.0
             normName.contains(primaryQuery) -> 24.0
@@ -279,23 +356,43 @@ internal object LocationSearchEngine {
         if (qualifierQuery.isNotBlank()) {
             val tokens = qualifierQuery.split(" ").filter { it.length >= 2 }
             val matchedTokens = tokens.count { tok ->
-                normContext.contains(tok) || normName.contains(tok)
+                matchesContextToken(tok) || normName.contains(tok)
             }
-            score += if (matchedTokens == tokens.size && tokens.isNotEmpty()) {
+            bestScore += if (matchedTokens == tokens.size && tokens.isNotEmpty()) {
                 45.0
             } else {
                 matchedTokens * 18.0
             }
+        } else if (normName.isNotBlank()) {
+            // Support comma-less qualified queries such as "Paris Texas", "London Ontario", "San Jose California"
+            val queryTokens = primaryQuery.split(" ").filter { it.isNotBlank() }
+            if (queryTokens.size >= 2) {
+                for (splitIdx in 1 until queryTokens.size) {
+                    val candPrimary = queryTokens.take(splitIdx).joinToString(" ")
+                    val candQualifier = queryTokens.drop(splitIdx).joinToString(" ")
+                    val qualTokens = candQualifier.split(" ").filter { it.length >= 2 }
+                    if (qualTokens.isEmpty()) continue
+                    val nameMatches = normName == candPrimary || normName.startsWith(candPrimary)
+                    val allQualMatchContext = qualTokens.all { matchesContextToken(it) }
+                    if (nameMatches && allQualMatchContext) {
+                        val splitScore = (if (normName == candPrimary) 60.0 else 42.0) + 45.0
+                        if (splitScore > bestScore) {
+                            bestScore = splitScore
+                        }
+                    }
+                }
+            }
         }
-        return score
+        return bestScore
     }
 
-    private fun normalizeText(raw: String): String {
+    internal fun normalizeText(raw: String): String {
         val decomposed = Normalizer.normalize(raw.trim(), Normalizer.Form.NFD)
-        return decomposed
-            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
-            .lowercase(Locale.US)
-            .replace(Regex("[^a-z0-9\\s]"), " ")
+        val withoutLatinDiacritics = decomposed.replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+        val recomposed = Normalizer.normalize(withoutLatinDiacritics, Normalizer.Form.NFC)
+        return recomposed
+            .lowercase(Locale.ROOT)
+            .replace(Regex("[^\\p{L}\\p{M}\\p{Nd}\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
     }

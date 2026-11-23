@@ -29,8 +29,9 @@ class LocationClient(
     private val photonService: PhotonGeocodingService = ApiClient.photonGeocodingService
 ) {
 
-    private val fusedClient: FusedLocationProviderClient =
+    private val fusedClient: FusedLocationProviderClient by lazy {
         LocationServices.getFusedLocationProviderClient(context)
+    }
 
     private val prefs = context.getSharedPreferences("weather_location_cache", Context.MODE_PRIVATE)
 

@@ -219,7 +219,8 @@ class SawsAlertClient(
                             description = description,
                             instruction = instruction,
                             expiresLabel = expiresLabel,
-                            severityLabel = severityLabel
+                            severityLabel = severityLabel,
+                            expiresEpochMs = expiresInstant?.toEpochMilli()
                         )
                     )
                 }

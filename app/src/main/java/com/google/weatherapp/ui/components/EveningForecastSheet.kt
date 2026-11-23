@@ -583,21 +583,35 @@ fun EveningForecastSheet(
                 )
             }
 
-            // 3. Rain Nowcast Preview
+            // 3. Precipitation Nowcast Preview
             val realNowcast = weatherData?.nowcast
-            val nowcastBody = if (realNowcast != null && realNowcast.isPrecipitationImminent) {
+            val heroCondLower = weatherData?.hero?.conditionText?.lowercase(java.util.Locale.US).orEmpty()
+            val todayPrecipType = weatherData?.dailyList?.firstOrNull()?.precipitationType
+            val precipLabel = realNowcast?.precipitationLabel?.trim()?.takeIf { it.isNotBlank() }
+                ?: when {
+                    todayPrecipType.equals("SNOW", ignoreCase = true) ||
+                        heroCondLower.contains("snow") || heroCondLower.contains("blizzard") || heroCondLower.contains("flurr") -> "Snow"
+                    todayPrecipType.equals("ICE", ignoreCase = true) ||
+                        heroCondLower.contains("freezing") || heroCondLower.contains("sleet") || heroCondLower.contains("ice") -> "Ice"
+                    else -> "Rain"
+                }
+            val nowcastSummary = if (realNowcast != null && realNowcast.isPrecipitationImminent) {
                 WeatherSummaryFormatter.generateRainNowcastSummary(
                     nowcast = realNowcast,
                     locationName = weatherData.hero.locationName
-                ).conciseText
+                )
             } else {
-                "No precipitation expected in the next 2 hours."
+                null
             }
+            val nowcastBody = nowcastSummary?.conciseText ?: "No precipitation expected in the next 2 hours."
+            val nowcastTitle = nowcastSummary?.title
+                ?: "$precipLabel alert • ${weatherData?.hero?.locationName ?: "Current Location"}"
+            val nowcastBadge = "${precipLabel.uppercase(java.util.Locale.US)} ALERT (EVENT-DRIVEN)"
 
             NotificationPreviewCard(
                 icon = Icons.Default.WaterDrop,
-                badgeText = "RAIN ALERT (EVENT-DRIVEN)",
-                title = "Rain alert • ${weatherData?.hero?.locationName ?: "Current Location"}",
+                badgeText = nowcastBadge,
+                title = nowcastTitle,
                 body = nowcastBody,
                 cardBg = cardBg,
                 cardBorder = cardBorder

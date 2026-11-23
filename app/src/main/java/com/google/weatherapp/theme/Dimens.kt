@@ -89,6 +89,8 @@ object ComponentTokens {
     val PageIndicatorDotSize: Dp = 6.dp
     val PageIndicatorActiveWidth: Dp = 18.dp
     val PageIndicatorGpsIconSize: Dp = 10.dp
+    val PageIndicatorTouchWidth: Dp = 24.dp
+    val PageIndicatorTouchHeight: Dp = 32.dp
 }
 
 object EffectTokens {
@@ -148,4 +150,20 @@ object DayDetailTokens {
     val SheetHandleHeight: Dp = 4.dp
     val DetailHourlyCardWidth: Dp = 60.dp
     val DetailHourlyCurveHeight: Dp = 28.dp
+}
+
+object MapTokens {
+    val TopControlButtonSize: Dp = 42.dp
+    val LayerRailWidth: Dp = 62.dp
+    val LayerRailItemHeight: Dp = 54.dp
+    val LayerRailIconSize: Dp = 20.dp
+    val LegendBarHeight: Dp = 6.dp
+    val TimelinePlayButtonSize: Dp = 40.dp
+    val ReticleOuterRadius: Dp = 18.dp
+    val ReticleInnerRadius: Dp = 4.dp
+    val InspectorMaxWidth: Dp = 440.dp
+    val SubModeChipHeight: Dp = 32.dp
+    val WindParticleStrokeMin: Dp = 1.1.dp
+    val WindParticleStrokeMax: Dp = 2.1.dp
+    val IsobarLineWidthPx: Float = 2.2f
 }

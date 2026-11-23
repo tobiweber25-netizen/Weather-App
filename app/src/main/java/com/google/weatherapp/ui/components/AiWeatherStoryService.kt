@@ -26,8 +26,9 @@ class AiWeatherStoryService {
         nowcast: PrecipitationNowcast? = null
     ): String? {
         val alertKey = alert?.takeIf { it.riskLevel != SeverityRiskLevel.LOW }?.title.orEmpty()
+        val satKey = alert?.liveSatellite?.formatCompactSummary().orEmpty()
         val precipKey = nowcast?.takeIf { it.isPrecipitationImminent }?.summaryText.orEmpty()
-        val cacheKey = "${hero.locationName}_${hero.tempDegrees}_${hero.conditionText}_${hero.isDaytime}_${alertKey}_${precipKey}"
+        val cacheKey = "${hero.locationName}_${hero.tempDegrees}_${hero.conditionText}_${hero.isDaytime}_${alertKey}_${satKey}_${precipKey}"
         synchronized(storyCache) {
             storyCache[cacheKey]?.let { return it }
         }
@@ -50,16 +51,20 @@ class AiWeatherStoryService {
                             if (t.aqiCategory != "Unavailable") appendLine("Air Quality: ${t.aqiValue} ${t.aqiScaleLabel} (${t.aqiCategory})")
                         }
                         nowcast?.takeIf { it.isPrecipitationImminent }?.let { n ->
-                            appendLine("Short-Term Rain Forecast: ${n.summaryText}")
+                            appendLine("Short-Term Precipitation Forecast: ${n.summaryText}")
                         }
                         alert?.takeIf { it.riskLevel != SeverityRiskLevel.LOW }?.let { a ->
                             appendLine("Active Alert: ${a.title} - ${a.subtitle}")
+                        }
+                        alert?.liveSatellite?.takeIf { it.hasActiveStormOrLightning || it.hasObservedRain }?.formatCompactSummary()?.let { sat ->
+                            appendLine("Live Space Satellite Observation (Meteosat): $sat")
                         }
                     }.trim()
 
                     val prompt = """
                         You are a $persona weather app assistant. Given the exact verified weather conditions below,
-                        generate a concise, accurate, maximum 2-sentence weather note that never contradicts any rain, wind, heat, UV, or storm alert.
+                        generate a concise, accurate, maximum 2-sentence weather note that never contradicts any rain, snow, ice, wind, heat, UV, or storm alert.
+                        Always use metric units only (°C, km/h, mm, km, hPa) and never use Fahrenheit or mph.
 
                         $contextLines
                     """.trimIndent()

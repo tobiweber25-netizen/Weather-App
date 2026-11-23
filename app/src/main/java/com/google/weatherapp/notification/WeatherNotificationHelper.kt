@@ -93,6 +93,25 @@ object WeatherNotificationHelper {
     // Backward compatibility alias
     fun createNotificationChannel(context: Context) = createNotificationChannels(context)
 
+    internal fun resolveTodayAndTomorrow(
+        data: WeatherDashboardData,
+        referenceDate: java.time.LocalDate? = null
+    ): Pair<com.google.weatherapp.data.model.DailyItem?, com.google.weatherapp.data.model.DailyItem?> {
+        val dailyList = data.dailyList
+        if (dailyList.isEmpty()) return null to null
+        val zoneId = WeatherMapper.resolveZoneId(data.timezone)
+        val todayDate = referenceDate ?: java.time.LocalDate.now(zoneId)
+        val todayStr = "${todayDate.monthValue}/${todayDate.dayOfMonth}"
+        val tomorrowDate = todayDate.plusDays(1)
+        val tomorrowStr = "${tomorrowDate.monthValue}/${tomorrowDate.dayOfMonth}"
+
+        val todayIdx = dailyList.indexOfFirst { it.dateText == todayStr }.takeIf { it >= 0 } ?: 0
+        val today = dailyList.getOrNull(todayIdx)
+        val tomorrow = dailyList.firstOrNull { it.dateText == tomorrowStr }
+            ?: dailyList.getOrNull(todayIdx + 1)
+        return today to tomorrow
+    }
+
     fun showTomorrowWeatherNotification(
         context: Context,
         data: WeatherDashboardData
@@ -103,19 +122,8 @@ object WeatherNotificationHelper {
         // Never fabricate a fake tomorrow forecast when real multi-day data is missing
         if (dailyList.size < 2) return false
 
-        val zoneId = WeatherMapper.resolveZoneId(data.timezone)
-        val todayDate = java.time.LocalDate.now(zoneId)
-        val todayStr = "${todayDate.monthValue}/${todayDate.dayOfMonth}"
-        val tomorrowDate = todayDate.plusDays(1)
-        val tomorrowStr = "${tomorrowDate.monthValue}/${tomorrowDate.dayOfMonth}"
-
-        val todayIdx = dailyList.indexOfFirst { it.dateText == todayStr }.takeIf { it >= 0 } ?: 0
-        val tomorrowIdx = dailyList.indexOfFirst { it.dateText == tomorrowStr }.takeIf { it >= 0 }
-            ?: (todayIdx + 1).takeIf { it < dailyList.size }
-            ?: return false
-
-        val today = dailyList[todayIdx]
-        val tomorrow = dailyList[tomorrowIdx]
+        val (today, tomorrow) = resolveTodayAndTomorrow(data)
+        if (today == null || tomorrow == null) return false
 
         val summary = WeatherSummaryFormatter.generateTomorrowSummary(
             today = today,
@@ -146,10 +154,8 @@ object WeatherNotificationHelper {
         if (dailyList.isEmpty()) return false
 
         val zoneId = WeatherMapper.resolveZoneId(data.timezone)
-        val todayDate = java.time.LocalDate.now(zoneId)
-        val todayStr = "${todayDate.monthValue}/${todayDate.dayOfMonth}"
-        val today = dailyList.firstOrNull { it.dateText == todayStr }
-            ?: dailyList.firstOrNull() ?: return false
+        val (today, _) = resolveTodayAndTomorrow(data)
+        if (today == null) return false
 
         val currentLocalHour = java.time.ZonedDateTime.now(zoneId).hour
         val upcomingHours = if (today.hourlyList.isNotEmpty()) {
@@ -194,6 +200,13 @@ object WeatherNotificationHelper {
             NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID_RAIN_CESSATION)
         } catch (_: Throwable) {}
 
+        val precipSubText = when {
+            nowcast.precipitationLabel.equals("Snow", ignoreCase = true) -> "Snow Alert"
+            nowcast.precipitationLabel?.contains("Freezing", ignoreCase = true) == true ||
+                nowcast.precipitationLabel.equals("Ice", ignoreCase = true) -> "Ice Alert"
+            else -> "Rain Alert"
+        }
+
         return dispatchNotification(
             context = context,
             channelId = CHANNEL_ALERTS,
@@ -201,7 +214,7 @@ object WeatherNotificationHelper {
             title = summary.title,
             conciseText = summary.conciseText,
             expandedText = summary.expandedDetails,
-            subText = "Rain Alert",
+            subText = precipSubText,
             priority = NotificationCompat.PRIORITY_HIGH
         )
     }
@@ -223,6 +236,13 @@ object WeatherNotificationHelper {
             NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID_RAIN)
         } catch (_: Throwable) {}
 
+        val stopSubText = when {
+            nowcast.precipitationLabel.equals("Snow", ignoreCase = true) -> "Snow Stopping"
+            nowcast.precipitationLabel?.contains("Freezing", ignoreCase = true) == true ||
+                nowcast.precipitationLabel.equals("Ice", ignoreCase = true) -> "Ice Stopping"
+            else -> "Rain Stopping"
+        }
+
         return dispatchNotification(
             context = context,
             channelId = CHANNEL_ALERTS,
@@ -230,7 +250,7 @@ object WeatherNotificationHelper {
             title = summary.title,
             conciseText = summary.conciseText,
             expandedText = summary.expandedDetails,
-            subText = "Rain Stopping",
+            subText = stopSubText,
             priority = NotificationCompat.PRIORITY_DEFAULT
         )
     }
@@ -265,7 +285,8 @@ object WeatherNotificationHelper {
         data: WeatherDashboardData,
         currentLocalHour: Int? = null
     ): Boolean {
-        val today = data.dailyList.firstOrNull() ?: return false
+        val (today, _) = resolveTodayAndTomorrow(data)
+        if (today == null) return false
         if (!WeatherNotificationScheduler.isExtremeHeatAlert(today, data.hero, currentLocalHour)) return false
         createNotificationChannels(context)
 
@@ -291,7 +312,8 @@ object WeatherNotificationHelper {
         context: Context,
         data: WeatherDashboardData
     ): Boolean {
-        val today = data.dailyList.firstOrNull() ?: return false
+        val (today, _) = resolveTodayAndTomorrow(data)
+        if (today == null) return false
         if (!WeatherNotificationScheduler.isFreezeHazard(today, data.telemetry)) return false
         createNotificationChannels(context)
 
@@ -318,7 +340,7 @@ object WeatherNotificationHelper {
         data: WeatherDashboardData,
         currentLocalHour: Int? = null
     ): Boolean {
-        val today = data.dailyList.firstOrNull()
+        val (today, _) = resolveTodayAndTomorrow(data)
         if (!WeatherNotificationScheduler.isGaleWindAlert(data.telemetry, today, currentLocalHour)) return false
         createNotificationChannels(context)
 
@@ -408,7 +430,8 @@ object WeatherNotificationHelper {
         context: Context,
         data: WeatherDashboardData
     ): Boolean {
-        val today = data.dailyList.firstOrNull() ?: return false
+        val (today, _) = resolveTodayAndTomorrow(data)
+        if (today == null) return false
         if (!WeatherNotificationScheduler.isExtremeUvAlert(today, data.telemetry)) return false
         createNotificationChannels(context)
 
@@ -434,8 +457,8 @@ object WeatherNotificationHelper {
         context: Context,
         data: WeatherDashboardData
     ): Boolean {
-        val today = data.dailyList.firstOrNull() ?: return false
-        val tomorrow = data.dailyList.getOrNull(1) ?: return false
+        val (today, tomorrow) = resolveTodayAndTomorrow(data)
+        if (today == null || tomorrow == null) return false
         if (!WeatherNotificationScheduler.isSharpTempDropAlert(today, tomorrow)) return false
         createNotificationChannels(context)
 

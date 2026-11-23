@@ -22,8 +22,8 @@ android {
         applicationId = "com.google.weatherapp"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "1.0.11"
+        versionCode = 13
+        versionName = "1.0.12"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -55,6 +55,9 @@ android {
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("release")
+            ndk {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -136,4 +139,7 @@ dependencies {
 
     // WorkManager for reliable background sync & notifications
     implementation("androidx.work:work-runtime-ktx:2.10.0")
+
+    // Native MapLibre OpenGL ES vector map engine (keyless OpenFreeMap Fiord + EUMETSAT/Open-Meteo weather layers)
+    implementation("org.maplibre.gl:android-sdk-opengl:13.0.2")
 }

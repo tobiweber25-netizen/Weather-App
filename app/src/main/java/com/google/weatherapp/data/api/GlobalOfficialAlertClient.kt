@@ -39,7 +39,7 @@ class GlobalOfficialAlertClient(
             fetchCanadaEcccAlerts(latitude, longitude, zoneId, now)?.let { alerts.addAll(it) }
         }
         alerts
-            .distinctBy { "${it.title.lowercase(Locale.US)}|${it.areaName.lowercase(Locale.US)}" }
+            .distinctBy { "${it.title.lowercase(Locale.ROOT)}|${it.areaName.lowercase(Locale.ROOT)}" }
             .sortedByDescending { it.severity.ordinal }
     }
 
@@ -72,7 +72,7 @@ class GlobalOfficialAlertClient(
         val maxLat = (latitude + delta).coerceAtMost(90.0)
         val url = String.format(
             Locale.US,
-            "https://api.weather.gc.ca/collections/weather-alerts/items?f=json&bbox=%.4f,%.4f,%.4f,%.4f&limit=10",
+            "https://api.weather.gc.ca/collections/weather-alerts/items?f=json&bbox=%.4f,%.4f,%.4f,%.4f&limit=50",
             minLon, minLat, maxLon, maxLat
         )
         val body = fetchJson(url, accept = "application/json") ?: return null
@@ -114,11 +114,12 @@ class GlobalOfficialAlertClient(
         ): List<OfficialWeatherAlert> {
             return try {
                 val root = JsonParser.parseString(rawJson).asJsonObject
-                val features = root.getAsJsonArray("features") ?: return emptyList()
+                val features = root.get("features")?.takeIf { it.isJsonArray }?.asJsonArray ?: return emptyList()
                 val alerts = mutableListOf<OfficialWeatherAlert>()
 
                 for (elem in features) {
-                    val props = elem.asJsonObject.getAsJsonObject("properties") ?: continue
+                    val featureObj = elem?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+                    val props = featureObj.get("properties")?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
                     val status = props.stringOrNull("status")
                     if (status != null && !status.equals("Actual", ignoreCase = true)) continue
                     val msgType = props.stringOrNull("messageType")
@@ -144,7 +145,7 @@ class GlobalOfficialAlertClient(
                     val description = cleanText(props.stringOrNull("description"))
                     val instruction = cleanText(props.stringOrNull("instruction"))
                     val expiresLabel = expiresInstant?.let {
-                        DateTimeFormatter.ofPattern("EEE HH:mm", Locale.getDefault())
+                        DateTimeFormatter.ofPattern("EEE HH:mm", Locale.US)
                             .withZone(zoneId)
                             .format(it)
                     }.orEmpty()
@@ -161,7 +162,8 @@ class GlobalOfficialAlertClient(
                             expiresLabel = expiresLabel,
                             severityLabel = severityRaw.ifBlank {
                                 mappedSeverity.name.lowercase(Locale.US).replaceFirstChar { it.uppercase() }
-                            }
+                            },
+                            expiresEpochMs = expiresInstant?.toEpochMilli()
                         )
                     )
                 }
@@ -180,17 +182,42 @@ class GlobalOfficialAlertClient(
         ): List<OfficialWeatherAlert> {
             return try {
                 val root = JsonParser.parseString(rawJson).asJsonObject
-                val features = root.getAsJsonArray("features") ?: return emptyList()
+                val features = root.get("features")?.takeIf { it.isJsonArray }?.asJsonArray ?: return emptyList()
                 val alerts = mutableListOf<OfficialWeatherAlert>()
 
                 for (elem in features) {
-                    val obj = elem.asJsonObject
-                    val geom = obj.getAsJsonObject("geometry")
+                    val obj = elem?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+                    val geom = obj.get("geometry")?.takeIf { it.isJsonObject }?.asJsonObject
                     if (geom != null && !isPointInGeoJsonGeometry(latitude, longitude, geom)) {
                         continue
                     }
-                    val props = obj.getAsJsonObject("properties") ?: continue
-                    val expiresRaw = props.stringOrNull("expiry_datetime") ?: props.stringOrNull("expires")
+                    val props = obj.get("properties")?.takeIf { it.isJsonObject }?.asJsonObject ?: continue
+
+                    val rawStatuses = listOfNotNull(
+                        props.stringOrNull("status_en"),
+                        props.stringOrNull("status_fr"),
+                        props.stringOrNull("status")
+                    ).map { it.trim().lowercase(Locale.ROOT) }.filter { it.isNotBlank() }
+                    val isInactiveStatus = rawStatuses.any { st ->
+                        st == "ended" ||
+                            st == "expired" ||
+                            st == "cancelled" ||
+                            st == "canceled" ||
+                            st == "inactive" ||
+                            st == "fin" ||
+                            st.startsWith("ended") ||
+                            st.startsWith("cancel") ||
+                            st.startsWith("expir") ||
+                            st.startsWith("termin") ||
+                            st.startsWith("annul")
+                    }
+                    if (isInactiveStatus) {
+                        continue
+                    }
+
+                    val expiresRaw = props.stringOrNull("expiration_datetime")
+                        ?: props.stringOrNull("expiry_datetime")
+                        ?: props.stringOrNull("expires")
                     val expiresInstant = expiresRaw?.let { parseIsoInstant(it) }
                     if (expiresInstant != null && expiresInstant.isBefore(now)) continue
 
@@ -206,17 +233,32 @@ class GlobalOfficialAlertClient(
                         "warning" -> SeverityRiskLevel.SEVERE
                         "watch" -> SeverityRiskLevel.HIGH
                         "advisory" -> SeverityRiskLevel.MODERATE
+                        "statement" -> SeverityRiskLevel.MODERATE
                         else -> mapSeverity(props.stringOrNull("severity").orEmpty(), title)
                     }
-                    val areaName = props.stringOrNull("area_name_en")
+                    val primaryArea = props.stringOrNull("feature_name_en")
+                        ?: props.stringOrNull("area_name_en")
                         ?: props.stringOrNull("zone_name_en")
-                        ?: ""
+                    val province = props.stringOrNull("province")
+                        ?: props.stringOrNull("province_en")
+                    val areaName = listOfNotNull(
+                        primaryArea?.trim()?.takeIf { it.isNotBlank() },
+                        province?.trim()?.takeIf { it.isNotBlank() && !it.equals(primaryArea?.trim(), ignoreCase = true) }
+                    ).joinToString(", ")
+
                     val description = cleanText(props.stringOrNull("alert_text_en") ?: props.stringOrNull("description_en"))
                     val expiresLabel = expiresInstant?.let {
-                        DateTimeFormatter.ofPattern("EEE HH:mm", Locale.getDefault())
+                        DateTimeFormatter.ofPattern("EEE HH:mm", Locale.US)
                             .withZone(zoneId)
                             .format(it)
                     }.orEmpty()
+
+                    val rawSeverityLabel = alertType.trim().replaceFirstChar { it.uppercase() }
+                    val cleanSeverityLabel = if (rawSeverityLabel.isNotBlank() && title.contains(rawSeverityLabel, ignoreCase = true)) {
+                        ""
+                    } else {
+                        rawSeverityLabel
+                    }
 
                     alerts.add(
                         OfficialWeatherAlert(
@@ -224,11 +266,12 @@ class GlobalOfficialAlertClient(
                             severity = mappedSeverity,
                             eventType = alertType.ifBlank { title },
                             source = "Environment Canada",
-                            areaName = areaName.trim(),
+                            areaName = areaName,
                             description = description,
                             instruction = "",
                             expiresLabel = expiresLabel,
-                            severityLabel = alertType.trim().replaceFirstChar { it.uppercase() }
+                            severityLabel = cleanSeverityLabel,
+                            expiresEpochMs = expiresInstant?.toEpochMilli()
                         )
                     )
                 }
@@ -240,7 +283,7 @@ class GlobalOfficialAlertClient(
 
         internal fun isPointInGeoJsonGeometry(latitude: Double, longitude: Double, geometry: JsonObject): Boolean {
             val type = geometry.stringOrNull("type") ?: return false
-            val coords = geometry.getAsJsonArray("coordinates") ?: return false
+            val coords = geometry.get("coordinates")?.takeIf { it.isJsonArray }?.asJsonArray ?: return false
             return when (type) {
                 "Polygon" -> isPointInGeoJsonPolygon(latitude, longitude, coords)
                 "MultiPolygon" -> (0 until coords.size()).any { idx ->
