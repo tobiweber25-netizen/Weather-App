@@ -19,6 +19,8 @@ import com.google.weatherapp.data.api.ApiClient
 import com.google.weatherapp.data.map.*
 import com.google.weatherapp.theme.MapCanvasFallbackBg
 import com.google.weatherapp.theme.MapIsobarStroke
+import com.google.weatherapp.theme.MapIsothermFreezingStroke
+import com.google.weatherapp.theme.MapIsothermStroke
 import com.google.weatherapp.theme.MapTokens
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
@@ -343,6 +345,19 @@ fun MapLibreWeatherCanvas(
         )
     }
 
+    // Sync real 4°C temperature isotherms (with distinct 0°C freezing line) via native MapLibre GeoJSON LineLayers
+    LaunchedEffect(loadedStyle, uiState.isotherms, uiState.selectedLayer, uiState.showIsotherms) {
+        val style = loadedStyle ?: return@LaunchedEffect
+        syncIsothermLayer(
+            style = style,
+            isotherms = if (uiState.selectedLayer == WeatherMapLayer.TEMPERATURE && uiState.showIsotherms) {
+                uiState.isotherms
+            } else {
+                emptyList()
+            }
+        )
+    }
+
     // Sync frame-rate-independent WindParticleOverlayView state
     LaunchedEffect(
         windOverlayView,
@@ -417,6 +432,10 @@ private const val SMOOTH_FIELD_SOURCE_ID = "almanac-smooth-field-source"
 private const val SMOOTH_FIELD_LAYER_ID = "almanac-smooth-field-layer"
 private const val ISOBAR_SOURCE_ID = "almanac-isobar-source"
 private const val ISOBAR_LAYER_ID = "almanac-isobar-layer"
+private const val ISOTHERM_SOURCE_ID = "almanac-isotherm-source"
+private const val ISOTHERM_LAYER_ID = "almanac-isotherm-layer"
+private const val ISOTHERM_FREEZING_SOURCE_ID = "almanac-isotherm-freezing-source"
+private const val ISOTHERM_FREEZING_LAYER_ID = "almanac-isotherm-freezing-layer"
 
 private fun resolveAnchorLayerId(style: Style): String? {
     val preferred = WeatherTileSourceResolver.FIORD_LABEL_ANCHOR_LAYER_ID
@@ -577,6 +596,89 @@ private fun syncIsobarLayer(
             style.addLayerBelow(lineLayer, anchor)
         } else {
             style.addLayer(lineLayer)
+        }
+    }
+}
+
+private fun syncIsothermLayer(
+    style: Style,
+    isotherms: List<IsothermContourLine>
+) {
+    if (!style.isFullyLoaded) return
+    val standardFeatures = isotherms
+        .filter { !it.isFreezingLine && it.points.size >= 2 }
+        .map { contour ->
+            val coords = contour.points.map { Point.fromLngLat(it.longitude, it.latitude) }
+            Feature.fromGeometry(LineString.fromLngLats(coords)).apply {
+                addNumberProperty("tempC", contour.temperatureC)
+            }
+        }
+    val freezingFeatures = isotherms
+        .filter { it.isFreezingLine && it.points.size >= 2 }
+        .map { contour ->
+            val coords = contour.points.map { Point.fromLngLat(it.longitude, it.latitude) }
+            Feature.fromGeometry(LineString.fromLngLats(coords)).apply {
+                addNumberProperty("tempC", contour.temperatureC)
+            }
+        }
+
+    val standardCollection = FeatureCollection.fromFeatures(standardFeatures)
+    val existingStandardSource = style.getSourceAs<GeoJsonSource>(ISOTHERM_SOURCE_ID)
+    if (existingStandardSource != null) {
+        existingStandardSource.setGeoJson(standardCollection)
+    } else {
+        style.addSource(GeoJsonSource(ISOTHERM_SOURCE_ID, standardCollection))
+    }
+
+    val anchor = resolveAnchorLayerId(style)
+    val existingStandardLayer = style.getLayerAs<LineLayer>(ISOTHERM_LAYER_ID)
+    if (existingStandardLayer != null) {
+        existingStandardLayer.setProperties(
+            PropertyFactory.visibility(if (standardFeatures.isEmpty()) Property.NONE else Property.VISIBLE)
+        )
+    } else {
+        val standardLayer = LineLayer(ISOTHERM_LAYER_ID, ISOTHERM_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor(MapIsothermStroke.toArgb()),
+            PropertyFactory.lineWidth(MapTokens.IsothermLineWidthPx),
+            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+            PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+            PropertyFactory.lineOpacity(0.76f),
+            PropertyFactory.visibility(if (standardFeatures.isEmpty()) Property.NONE else Property.VISIBLE)
+        )
+        if (anchor != null) {
+            style.addLayerBelow(standardLayer, anchor)
+        } else {
+            style.addLayer(standardLayer)
+        }
+    }
+
+    val freezingCollection = FeatureCollection.fromFeatures(freezingFeatures)
+    val existingFreezingSource = style.getSourceAs<GeoJsonSource>(ISOTHERM_FREEZING_SOURCE_ID)
+    if (existingFreezingSource != null) {
+        existingFreezingSource.setGeoJson(freezingCollection)
+    } else {
+        style.addSource(GeoJsonSource(ISOTHERM_FREEZING_SOURCE_ID, freezingCollection))
+    }
+
+    val existingFreezingLayer = style.getLayerAs<LineLayer>(ISOTHERM_FREEZING_LAYER_ID)
+    if (existingFreezingLayer != null) {
+        existingFreezingLayer.setProperties(
+            PropertyFactory.visibility(if (freezingFeatures.isEmpty()) Property.NONE else Property.VISIBLE)
+        )
+    } else {
+        val freezingLayer = LineLayer(ISOTHERM_FREEZING_LAYER_ID, ISOTHERM_FREEZING_SOURCE_ID).withProperties(
+            PropertyFactory.lineColor(MapIsothermFreezingStroke.toArgb()),
+            PropertyFactory.lineWidth(MapTokens.IsothermFreezingLineWidthPx),
+            PropertyFactory.lineDasharray(arrayOf(2.5f, 1.5f)),
+            PropertyFactory.lineCap(Property.LINE_CAP_ROUND),
+            PropertyFactory.lineJoin(Property.LINE_JOIN_ROUND),
+            PropertyFactory.lineOpacity(0.95f),
+            PropertyFactory.visibility(if (freezingFeatures.isEmpty()) Property.NONE else Property.VISIBLE)
+        )
+        if (anchor != null) {
+            style.addLayerBelow(freezingLayer, anchor)
+        } else {
+            style.addLayer(freezingLayer)
         }
     }
 }

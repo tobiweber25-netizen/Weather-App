@@ -338,6 +338,92 @@ class WeatherFieldMathTest {
         )
     }
 
+    @Test
+    fun extractTemperatureSpots_samplesPriorityCitiesAndInteriorLatticeWithThermalColors() {
+        // South-to-North thermal gradient from 8°C at -35° to 28°C at -31°
+        val rows = 5
+        val cols = 5
+        val temps = FloatArray(rows * cols) { idx ->
+            val r = idx / cols
+            8f + r * 5f // 8, 13, 18, 23, 28°C
+        }
+        val grid = buildTestGrid(
+            rows = rows,
+            cols = cols,
+            southLat = -35.0,
+            northLat = -31.0,
+            westLon = 17.0,
+            eastLon = 21.0,
+            temps = temps
+        )
+        val viewport = MapViewportBounds(
+            south = -35.0,
+            west = 17.0,
+            north = -31.0,
+            east = 21.0,
+            zoom = 6.2
+        )
+        val priorityPlaces = listOf(
+            "Cape Town" to GeoPoint(-33.0, 19.0),
+            "Cape Town Duplicate" to GeoPoint(-33.005, 19.005), // within 0.02° -> deduplicated
+            "Out of Bounds City" to GeoPoint(51.5, -0.12)       // outside grid -> ignored
+        )
+
+        val spots = WeatherFieldMath.extractTemperatureSpots(
+            composite = WeatherGridComposite(grid),
+            hourIndex = 0,
+            viewport = viewport,
+            priorityPlaces = priorityPlaces
+        )
+
+        assertTrue("Expected priority city + regional lattice temperature spots", spots.size >= 15)
+        val prioritySpots = spots.filter { it.isPriorityCity }
+        assertEquals("Near-identical priority coordinates must deduplicate", 1, prioritySpots.size)
+        val capeTownSpot = prioritySpots.first()
+        assertEquals("Cape Town", capeTownSpot.placeLabel)
+        assertEquals(18, capeTownSpot.temperatureC)
+        assertEquals(18.0, capeTownSpot.exactTemperatureC, 0.25)
+        assertTrue("Spot color must be fully opaque ARGB", (capeTownSpot.colorArgb ushr 24) == 0xFF)
+
+        // Regional lattice spots must span the cold southern band (~10-12°C) to warm northern band (~24-26°C)
+        val regionalTemps = spots.filter { !it.isPriorityCity }.map { it.temperatureC }
+        assertTrue("Expected cool southern spot <= 12°C, got $regionalTemps", regionalTemps.minOrNull()!! <= 12)
+        assertTrue("Expected warm northern spot >= 24°C, got $regionalTemps", regionalTemps.maxOrNull()!! >= 24)
+    }
+
+    @Test
+    fun extractIsothermContours_extracts4DegreeContoursAndFlagsFreezingLine() {
+        // Temperature gradient from -6°C at south (-35°) to +18°C at north (-31°)
+        val rows = 7
+        val cols = 7
+        val temps = FloatArray(rows * cols) { idx ->
+            val r = idx / cols
+            -6f + r * 4f // -6, -2, +2, +6, +10, +14, +18°C
+        }
+        val grid = buildTestGrid(
+            rows = rows,
+            cols = cols,
+            southLat = -35.0,
+            northLat = -31.0,
+            westLon = 17.0,
+            eastLon = 21.0,
+            temps = temps
+        )
+
+        val isotherms = WeatherFieldMath.extractIsothermContours(grid, hourIndex = 0, stepC = 4)
+        assertTrue("Expected multiple 4°C isotherms across -6..+18°C", isotherms.isNotEmpty())
+        val levels = isotherms.map { it.temperatureC }.toSet()
+        assertEquals(setOf(-4, 0, 4, 8, 12, 16), levels)
+
+        val freezingContours = isotherms.filter { it.isFreezingLine }
+        assertTrue("0°C isotherm must be flagged as freezing line", freezingContours.isNotEmpty())
+        assertTrue(freezingContours.all { it.temperatureC == 0 })
+        assertTrue(
+            "Non-zero isotherms must have isFreezingLine == false",
+            isotherms.filter { it.temperatureC != 0 }.none { it.isFreezingLine }
+        )
+    }
+
     private fun buildTestGrid(
         rows: Int,
         cols: Int,

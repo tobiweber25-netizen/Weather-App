@@ -279,4 +279,166 @@ class WeatherTileSourceResolverTest {
         assertTrue(tokyoPastClouds.useSmoothOpenMeteoField)
         assertTrue(tokyoPastClouds.sourceBadge.contains("-1h"))
     }
+
+    @Test
+    fun tuneBasemapStyleForWeatherLegibility_enforcesProgressiveZoomTiersCollisionPaddingAndDarkHalos() {
+        val rawFiordSnippet = """
+            {
+              "version": 8,
+              "layers": [
+                {
+                  "id": "water_name",
+                  "type": "symbol",
+                  "layout": {
+                    "text-field": "{name:latin}\n{name:nonlatin}"
+                  },
+                  "paint": {
+                    "text-color": "#516075",
+                    "text-halo-width": 1.0
+                  }
+                },
+                {
+                  "id": "highway_name_other",
+                  "type": "symbol",
+                  "layout": {
+                    "text-field": "{name:latin}"
+                  },
+                  "paint": {}
+                },
+                {
+                  "id": "place_other",
+                  "type": "symbol",
+                  "layout": { "text-field": "{name:latin}\n{name:nonlatin}", "text-padding": 2 },
+                  "paint": { "text-halo-width": 1.0 }
+                },
+                {
+                  "id": "place_suburb",
+                  "type": "symbol",
+                  "layout": { "text-field": "{name:latin}\n{name:nonlatin}", "text-padding": 2 },
+                  "paint": { "text-halo-width": 1.0 }
+                },
+                {
+                  "id": "place_village",
+                  "type": "symbol",
+                  "layout": { "text-field": "{name:latin}\n{name:nonlatin}", "text-padding": 2 },
+                  "paint": { "text-halo-width": 1.0 }
+                },
+                {
+                  "id": "place_town",
+                  "type": "symbol",
+                  "layout": {
+                    "icon-image": "dot_9",
+                    "text-anchor": "left",
+                    "text-offset": [0.5, 0.2],
+                    "text-field": "{name:latin}\n{name:nonlatin}",
+                    "text-padding": 2
+                  },
+                  "paint": { "text-halo-width": 1.0 }
+                },
+                {
+                  "id": "place_city",
+                  "type": "symbol",
+                  "layout": {
+                    "icon-image": "dot_9",
+                    "text-anchor": "bottom",
+                    "text-field": "{name:latin}\n{name:nonlatin}",
+                    "text-padding": 2
+                  },
+                  "paint": { "text-halo-width": 1.0 }
+                },
+                {
+                  "id": "place_city_large",
+                  "type": "symbol",
+                  "layout": {
+                    "text-field": "{name:latin}\n{name:nonlatin}",
+                    "text-padding": 2
+                  },
+                  "paint": { "text-halo-width": 1.0 }
+                },
+                {
+                  "id": "place_state",
+                  "type": "symbol",
+                  "layout": {
+                    "text-field": "{name:latin}\n{name:nonlatin}",
+                    "text-padding": 2
+                  },
+                  "paint": { "text-halo-width": 1.0 }
+                },
+                {
+                  "id": "place_country_minor",
+                  "type": "symbol",
+                  "layout": { "text-field": "{name:latin}\n{name:nonlatin}" },
+                  "paint": {}
+                },
+                {
+                  "id": "place_country_major",
+                  "type": "symbol",
+                  "layout": { "text-field": "{name:latin}\n{name:nonlatin}" },
+                  "paint": {}
+                },
+                {
+                  "id": "place_continent",
+                  "type": "symbol",
+                  "layout": { "text-field": "{name:latin}\n{name:nonlatin}" },
+                  "paint": {}
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val tunedJson = WeatherTileSourceResolver.tuneBasemapStyleForWeatherLegibility(rawFiordSnippet)
+        assertFalse("Multi-line \\n label concatenation must be removed", tunedJson.contains("\\n"))
+
+        val root = com.google.gson.JsonParser.parseString(tunedJson).asJsonObject
+        val layersById = root.getAsJsonArray("layers").associate {
+            val obj = it.asJsonObject
+            obj.get("id").asString to obj
+        }
+
+        // Verify progressive minzoom / maxzoom hierarchy prevents zoom-out label pileups
+        assertEquals(1.0, layersById.getValue("place_continent").get("minzoom").asDouble, 0.01)
+        assertEquals(3.5, layersById.getValue("place_continent").get("maxzoom").asDouble, 0.01)
+        assertEquals(2.0, layersById.getValue("place_country_major").get("minzoom").asDouble, 0.01)
+        assertEquals(6.5, layersById.getValue("place_country_major").get("maxzoom").asDouble, 0.01)
+        assertEquals(3.5, layersById.getValue("place_country_minor").get("minzoom").asDouble, 0.01)
+        assertEquals(7.5, layersById.getValue("place_country_minor").get("maxzoom").asDouble, 0.01)
+        assertEquals(5.2, layersById.getValue("place_state").get("minzoom").asDouble, 0.01)
+        assertEquals(8.5, layersById.getValue("place_state").get("maxzoom").asDouble, 0.01)
+        assertEquals(3.2, layersById.getValue("place_city_large").get("minzoom").asDouble, 0.01)
+        assertEquals(13.5, layersById.getValue("place_city_large").get("maxzoom").asDouble, 0.01)
+        assertEquals(5.8, layersById.getValue("place_city").get("minzoom").asDouble, 0.01)
+        assertEquals(14.0, layersById.getValue("place_city").get("maxzoom").asDouble, 0.01)
+        assertEquals(7.5, layersById.getValue("place_town").get("minzoom").asDouble, 0.01)
+        assertEquals(9.5, layersById.getValue("place_village").get("minzoom").asDouble, 0.01)
+        assertEquals(10.5, layersById.getValue("place_suburb").get("minzoom").asDouble, 0.01)
+        assertEquals(11.5, layersById.getValue("place_other").get("minzoom").asDouble, 0.01)
+        assertEquals(9.0, layersById.getValue("water_name").get("minzoom").asDouble, 0.01)
+        assertEquals(9.0, layersById.getValue("highway_name_other").get("minzoom").asDouble, 0.01)
+
+        // Verify wide collision padding, centered anchors, removed dot icons, and strong dark halos
+        val townLayout = layersById.getValue("place_town").getAsJsonObject("layout")
+        assertNull("Off-center dot icon must be stripped from place_town", townLayout.get("icon-image"))
+        assertEquals("center", townLayout.get("text-anchor").asString)
+        assertEquals(10, townLayout.get("text-padding").asInt)
+        assertFalse(townLayout.get("text-allow-overlap").asBoolean)
+        assertFalse(townLayout.get("text-ignore-placement").asBoolean)
+
+        val stateLayout = layersById.getValue("place_state").getAsJsonObject("layout")
+        val statePaint = layersById.getValue("place_state").getAsJsonObject("paint")
+        assertEquals(16, stateLayout.get("text-padding").asInt)
+        assertEquals("uppercase", stateLayout.get("text-transform").asString)
+        assertEquals("#CBD5E1", statePaint.get("text-color").asString)
+        assertEquals("rgba(6, 13, 24, 0.95)", statePaint.get("text-halo-color").asString)
+        assertEquals(2.0, statePaint.get("text-halo-width").asDouble, 0.01)
+
+        val largeCityLayout = layersById.getValue("place_city_large").getAsJsonObject("layout")
+        val largeCityPaint = layersById.getValue("place_city_large").getAsJsonObject("paint")
+        assertEquals(14, largeCityLayout.get("text-padding").asInt)
+        assertEquals("none", largeCityLayout.get("text-transform").asString)
+        assertEquals("Noto Sans Bold", largeCityLayout.getAsJsonArray("text-font")[0].asString)
+        assertEquals("#F8FAFC", largeCityPaint.get("text-color").asString)
+        assertEquals("rgba(6, 13, 24, 0.95)", largeCityPaint.get("text-halo-color").asString)
+        assertEquals(2.2, largeCityPaint.get("text-halo-width").asDouble, 0.01)
+        assertEquals(0.4, largeCityPaint.get("text-halo-blur").asDouble, 0.01)
+    }
 }

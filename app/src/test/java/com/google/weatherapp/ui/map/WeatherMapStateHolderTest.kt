@@ -232,6 +232,122 @@ class WeatherMapStateHolderTest {
         assertEquals(0, WeatherMapUiState(hourOffset = -2, gridComposite = null).gridHourIndex)
     }
 
+    @Test
+    fun temperatureLayer_populatesSpotsAndIsothermsAndUpdatesAcrossTimelineAndToggles() {
+        val now = Instant.parse("2026-11-23T13:20:00Z")
+        val lat = -33.9249
+        val lon = 18.4241
+        val initialViewport = WeatherMapGridClient.estimateInitialViewport(lat, lon)
+        val canonicalBounds = WeatherMapGridClient.computePaddedFetchBounds(initialViewport)
+
+        // Build a 50-hour grid with a real south-to-north temperature gradient so isotherms & spots both populate
+        val rows = WeatherMapGridClient.GRID_ROWS
+        val cols = WeatherMapGridClient.GRID_COLS
+        val pts = rows * cols
+        val hours = 50
+        val total = hours * pts
+        val startHourUtc = Instant.parse("2026-11-23T11:00:00Z")
+        val times = List(hours) { h -> utcHourFmt.format(startHourUtc.plus(h.toLong(), ChronoUnit.HOURS)) }
+        val temps = FloatArray(total)
+        val ws = FloatArray(total) { 15f }
+        val wd = FloatArray(total) { 180f }
+        val wu = FloatArray(total) { 0f }
+        val wv = FloatArray(total) { 15f }
+
+        for (h in 0 until hours) {
+            val baseTempForHour = 10f + h * 1.5f
+            val hourOffsetIdx = h * pts
+            for (r in 0 until rows) {
+                for (c in 0 until cols) {
+                    // Vary temperature by latitude row (-4°C..+14°C around baseTempForHour) so 4°C isotherms exist
+                    temps[hourOffsetIdx + r * cols + c] = baseTempForHour - 6f + r * 2f
+                }
+            }
+        }
+
+        val grid = WeatherGridField(
+            rows = rows,
+            cols = cols,
+            southLat = canonicalBounds.south,
+            northLat = canonicalBounds.north,
+            westLon = canonicalBounds.west,
+            eastLon = canonicalBounds.east,
+            zoomLevel = canonicalBounds.zoom,
+            fetchEpochMs = now.toEpochMilli(),
+            hourlyTimesUtc = times,
+            windSpeedKmH = ws,
+            windDirectionDeg = wd,
+            windU = wu,
+            windV = wv,
+            windGustsKmH = FloatArray(total) { 22f },
+            temperatureC = temps,
+            precipitationMm = FloatArray(total) { 0f },
+            cloudCoverPct = FloatArray(total) { 20f },
+            pressureHpa = FloatArray(total) { 1015f },
+            capeJkg = FloatArray(total) { 0f },
+            weatherCode = IntArray(total) { 1 },
+            pastHours = 2
+        )
+
+        val client = WeatherMapGridClient(clockMs = { now.toEpochMilli() }).apply { putCachedGrid(grid) }
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val controller = WeatherMapStateHolder(
+            scope = scope,
+            initialLayer = WeatherMapLayer.TEMPERATURE,
+            initialLatitude = lat,
+            initialLongitude = lon,
+            initialPlaceName = "Cape Town",
+            initialZoneId = ZoneOffset.UTC,
+            initialPriorityPlaces = listOf(
+                "Cape Town" to GeoPoint(lat, lon),
+                "Stellenbosch" to GeoPoint(-33.9321, 18.8602)
+            ),
+            gridClient = client,
+            clock = { now },
+            computeDispatcher = Dispatchers.Unconfined
+        )
+
+        try {
+            val initialState = controller.uiState.value
+            assertTrue(initialState.showTemperatureBadges)
+            assertTrue(initialState.showIsotherms)
+            assertTrue("Temperature spots must populate on Temp layer", initialState.temperatureSpots.isNotEmpty())
+            assertTrue("Isotherms must populate on Temp layer", initialState.isotherms.isNotEmpty())
+
+            val capeTownLive = initialState.temperatureSpots.first { it.isPriorityCity && it.placeLabel == "Cape Town" }
+            val stellenboschLive = initialState.temperatureSpots.first { it.isPriorityCity && it.placeLabel == "Stellenbosch" }
+            assertNotNull(capeTownLive)
+            assertNotNull(stellenboschLive)
+
+            // Scrubbing to +6h must update temperature spots and isotherms to the +6h forecast temperatures
+            controller.setHourOffset(6)
+            val futureState = controller.uiState.value
+            val capeTownPlus6 = futureState.temperatureSpots.first { it.isPriorityCity && it.placeLabel == "Cape Town" }
+            assertTrue(
+                "Forecast +6h temperature (${capeTownPlus6.exactTemperatureC}) must be warmer than live (${capeTownLive.exactTemperatureC})",
+                capeTownPlus6.exactTemperatureC > capeTownLive.exactTemperatureC + 5.0
+            )
+
+            // Tapping a priority city spot attaches the city's placeLabel to the inspector readout
+            controller.onMapTapped(lat, lon)
+            assertEquals("Cape Town", controller.uiState.value.tappedReading?.placeLabel)
+
+            // Toggling temperature badges and isotherms updates state flags cleanly
+            controller.toggleTemperatureBadges()
+            assertFalse(controller.uiState.value.showTemperatureBadges)
+            controller.toggleTemperatureBadges()
+            assertTrue(controller.uiState.value.showTemperatureBadges)
+
+            controller.toggleIsotherms()
+            assertFalse(controller.uiState.value.showIsotherms)
+            controller.toggleIsotherms()
+            assertTrue(controller.uiState.value.showIsotherms)
+        } finally {
+            controller.dispose()
+            scope.cancel()
+        }
+    }
+
     private data class HourValues(
         val speed: Float,
         val dir: Float,

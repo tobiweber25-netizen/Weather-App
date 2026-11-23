@@ -2,6 +2,7 @@ package com.google.weatherapp.ui.map
 
 import android.graphics.Bitmap
 import com.google.weatherapp.data.map.*
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,6 +19,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
+import kotlin.math.abs
 
 data class WeatherMapUiState(
     val selectedLayer: WeatherMapLayer = WeatherMapLayer.WIND,
@@ -26,6 +28,8 @@ data class WeatherMapUiState(
     val showWindStreamlines: Boolean = true,
     val showLightning: Boolean = true,
     val showStormEnergy: Boolean = false,
+    val showTemperatureBadges: Boolean = true,
+    val showIsotherms: Boolean = true,
     val hourOffset: Int = 0, // -2..47 on Storms/Satellite, 0..47 on Wind/Temp/Pressure
     val isPlaying: Boolean = false,
     val focusedPlaceName: String = "Current Location",
@@ -37,6 +41,8 @@ data class WeatherMapUiState(
     val smoothFieldBounds: MapViewportBounds? = null,
     val isobars: List<IsobarContourLine> = emptyList(),
     val pressureCenters: List<PressureCenterMarker> = emptyList(),
+    val temperatureSpots: List<TemperatureSpotMarker> = emptyList(),
+    val isotherms: List<IsothermContourLine> = emptyList(),
     val rainViewerFrames: List<RainViewerRadarFrame> = emptyList(),
     val tilePlan: ResolvedMapTilePlan = WeatherTileSourceResolver.resolve(
         layer = WeatherMapLayer.WIND,
@@ -74,10 +80,20 @@ class WeatherMapStateHolder(
     initialLongitude: Double,
     initialPlaceName: String,
     initialZoneId: ZoneId = ZoneId.systemDefault(),
+    initialPriorityPlaces: List<Pair<String, GeoPoint>> = emptyList(),
     private val gridClient: WeatherMapGridClient = WeatherMapGridClient.sharedInstance,
-    private val clock: () -> Instant = { Instant.now() }
+    private val clock: () -> Instant = { Instant.now() },
+    private val computeDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) {
     private val initialNow: Instant = clock()
+    private var focusedAnchorLat: Double = initialLatitude
+    private var focusedAnchorLon: Double = initialLongitude
+    private var priorityPlaces: List<Pair<String, GeoPoint>> = buildPriorityPlacesList(
+        focusName = initialPlaceName,
+        focusLat = focusedAnchorLat,
+        focusLon = focusedAnchorLon,
+        places = initialPriorityPlaces
+    )
     private val _uiState = MutableStateFlow(
         WeatherMapUiState(
             selectedLayer = initialLayer,
@@ -157,7 +173,7 @@ class WeatherMapStateHolder(
                 if (_uiState.value.gridStatus !is WeatherMapGridStatus.Ready) {
                     _uiState.update { it.copy(gridStatus = WeatherMapGridStatus.Ready) }
                 }
-                if (planFieldChanged) {
+                if (planFieldChanged || latest.selectedLayer == WeatherMapLayer.TEMPERATURE) {
                     rebuildVisualProducts()
                 }
             }
@@ -291,6 +307,35 @@ class WeatherMapStateHolder(
         rebuildVisualProducts()
     }
 
+    fun toggleTemperatureBadges() {
+        _uiState.update { it.copy(showTemperatureBadges = !it.showTemperatureBadges) }
+        if (_uiState.value.showTemperatureBadges && _uiState.value.temperatureSpots.isEmpty()) {
+            rebuildVisualProducts()
+        }
+    }
+
+    fun toggleIsotherms() {
+        _uiState.update { it.copy(showIsotherms = !it.showIsotherms) }
+        if (_uiState.value.showIsotherms && _uiState.value.isotherms.isEmpty()) {
+            rebuildVisualProducts()
+        }
+    }
+
+    fun updatePriorityPlaces(places: List<Pair<String, GeoPoint>>) {
+        val state = _uiState.value
+        val updated = buildPriorityPlacesList(
+            focusName = state.focusedPlaceName,
+            focusLat = focusedAnchorLat,
+            focusLon = focusedAnchorLon,
+            places = places
+        )
+        if (updated == priorityPlaces) return
+        priorityPlaces = updated
+        if (state.selectedLayer == WeatherMapLayer.TEMPERATURE && state.gridComposite != null) {
+            rebuildVisualProducts()
+        }
+    }
+
     fun setHourOffset(offset: Int, fromUserScrub: Boolean = true) {
         if (fromUserScrub && _uiState.value.isPlaying) {
             stopPlayback()
@@ -349,6 +394,14 @@ class WeatherMapStateHolder(
 
     fun updateFocusLocation(name: String, latitude: Double, longitude: Double, zoneId: ZoneId?) {
         val now = clock()
+        focusedAnchorLat = latitude
+        focusedAnchorLon = longitude
+        priorityPlaces = buildPriorityPlacesList(
+            focusName = name,
+            focusLat = focusedAnchorLat,
+            focusLon = focusedAnchorLon,
+            places = priorityPlaces
+        )
         _uiState.update { current ->
             val resolvedZone = zoneId ?: current.activeZoneId
             val next = current.copy(
@@ -365,6 +418,9 @@ class WeatherMapStateHolder(
             next.copy(tilePlan = resolvePlanFor(next, now))
         }
         maybeFetchRainViewerFrames()
+        if (_uiState.value.selectedLayer == WeatherMapLayer.TEMPERATURE) {
+            rebuildVisualProducts()
+        }
     }
 
     fun dispose() {
@@ -462,6 +518,14 @@ class WeatherMapStateHolder(
         rebuildVisualProducts()
     }
 
+    private data class RenderedMapProducts(
+        val bitmap: Bitmap?,
+        val isobars: List<IsobarContourLine>,
+        val pressureCenters: List<PressureCenterMarker>,
+        val temperatureSpots: List<TemperatureSpotMarker>,
+        val isotherms: List<IsothermContourLine>
+    )
+
     private fun rebuildVisualProducts() {
         val snapshot = _uiState.value
         val composite = snapshot.gridComposite ?: return
@@ -469,20 +533,26 @@ class WeatherMapStateHolder(
         val hourIndex = snapshot.gridHourIndex
         val layer = snapshot.selectedLayer
         val windMode = snapshot.windMetricMode
+        val viewport = lastViewport
+        val placesSnapshot = priorityPlaces
 
         renderJob?.cancel()
         renderJob = scope.launch {
-            val rendered = withContext(Dispatchers.Default) {
+            val rendered = withContext(computeDispatcher) {
                 val bmp = if (plan.useSmoothOpenMeteoField) {
-                    WeatherFieldMath.renderSmoothFieldBitmap(
-                        composite = composite,
-                        layer = layer,
-                        hourIndex = hourIndex,
-                        windMetricMode = windMode,
-                        width = FIELD_BITMAP_SIZE,
-                        height = FIELD_BITMAP_SIZE,
-                        stormFieldMode = plan.stormFieldMode
-                    )
+                    try {
+                        WeatherFieldMath.renderSmoothFieldBitmap(
+                            composite = composite,
+                            layer = layer,
+                            hourIndex = hourIndex,
+                            windMetricMode = windMode,
+                            width = FIELD_BITMAP_SIZE,
+                            height = FIELD_BITMAP_SIZE,
+                            stormFieldMode = plan.stormFieldMode
+                        )
+                    } catch (_: Throwable) {
+                        null
+                    }
                 } else {
                     null
                 }
@@ -496,15 +566,41 @@ class WeatherMapStateHolder(
                 } else {
                     emptyList()
                 }
-                Triple(bmp, isobars, centers)
+                val tempSpots = if (layer == WeatherMapLayer.TEMPERATURE) {
+                    WeatherFieldMath.extractTemperatureSpots(
+                        composite = composite,
+                        hourIndex = hourIndex,
+                        viewport = viewport,
+                        priorityPlaces = placesSnapshot
+                    )
+                } else {
+                    emptyList()
+                }
+                val isotherms = if (layer == WeatherMapLayer.TEMPERATURE) {
+                    WeatherFieldMath.extractIsothermContours(
+                        composite = composite,
+                        hourIndex = hourIndex
+                    )
+                } else {
+                    emptyList()
+                }
+                RenderedMapProducts(
+                    bitmap = bmp,
+                    isobars = isobars,
+                    pressureCenters = centers,
+                    temperatureSpots = tempSpots,
+                    isotherms = isotherms
+                )
             }
 
             _uiState.update { current ->
                 current.copy(
-                    smoothFieldBitmap = rendered.first,
-                    smoothFieldBounds = if (rendered.first != null) composite.toBounds() else null,
-                    isobars = rendered.second,
-                    pressureCenters = rendered.third
+                    smoothFieldBitmap = rendered.bitmap,
+                    smoothFieldBounds = if (rendered.bitmap != null) composite.toBounds() else null,
+                    isobars = rendered.isobars,
+                    pressureCenters = rendered.pressureCenters,
+                    temperatureSpots = rendered.temperatureSpots,
+                    isotherms = rendered.isotherms
                 )
             }
         }
@@ -514,14 +610,40 @@ class WeatherMapStateHolder(
         val lat = state.tappedLat ?: return null
         val lon = state.tappedLon ?: return null
         val composite = state.gridComposite ?: return null
+        val matchedLabel = priorityPlaces.firstOrNull { (_, pt) ->
+            abs(pt.latitude - lat) < 0.03 && abs(pt.longitude - lon) < 0.03
+        }?.first
         return WeatherFieldMath.samplePointReading(
             composite = composite,
             hourIndex = state.gridHourIndex,
             latitude = lat,
             longitude = lon,
             timeLabel = state.timeLabel,
-            placeLabel = null
+            placeLabel = matchedLabel
         )
+    }
+
+    private fun buildPriorityPlacesList(
+        focusName: String,
+        focusLat: Double,
+        focusLon: Double,
+        places: List<Pair<String, GeoPoint>>
+    ): List<Pair<String, GeoPoint>> {
+        val result = mutableListOf<Pair<String, GeoPoint>>()
+        if (focusName.isNotBlank()) {
+            result.add(focusName to GeoPoint(focusLat, focusLon))
+        }
+        for ((name, pt) in places) {
+            if (name.isBlank()) continue
+            val exists = result.any { (_, existingPt) ->
+                abs(existingPt.latitude - pt.latitude) < 0.02 &&
+                    abs(existingPt.longitude - pt.longitude) < 0.02
+            }
+            if (!exists) {
+                result.add(name to pt)
+            }
+        }
+        return result
     }
 
     private fun resolvePlanFor(

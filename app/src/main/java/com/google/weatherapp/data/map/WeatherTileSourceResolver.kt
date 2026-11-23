@@ -1,5 +1,7 @@
 package com.google.weatherapp.data.map
 
+import com.google.gson.JsonArray
+import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.google.weatherapp.data.api.ApiClient
 import com.google.weatherapp.theme.*
@@ -527,7 +529,11 @@ object WeatherTileSourceResolver {
                 styleHttpClient.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) return@use null
                     val body = resp.body?.string()?.trim()
-                    if (body != null && body.startsWith("{") && body.contains("\"layers\"")) body else null
+                    if (body != null && body.startsWith("{") && body.contains("\"layers\"")) {
+                        tuneBasemapStyleForWeatherLegibility(body)
+                    } else {
+                        null
+                    }
                 }
             } catch (_: Exception) {
                 null
@@ -544,11 +550,169 @@ object WeatherTileSourceResolver {
         }
 
     /**
-     * Minimal, zero-sprite midnight-blue OpenFreeMap vector style preserving the exact
-     * `boundary_state` label anchor so weather overlays stay underneath borders and city names
-     * even if the remote Fiord style endpoint or sprite sheet hiccups.
+     * Rewrites OpenFreeMap Fiord (or fallback vector) label layers for high-legibility weather overlays:
+     * 1. Enforces a progressive minzoom/maxzoom hierarchy so continents, countries, provinces/states,
+     *    major cities, secondary cities, towns, villages, suburbs, and roads/waterways fade in by zoom tier
+     *    instead of piling on top of each other when zoomed out.
+     * 2. Replaces tall two-line Latin+non-Latin concatenations and off-center dot-icon anchors with
+     *    centered single-line labels and generous collision padding (10..16px).
+     * 3. Upgrades label typography to Noto Sans Bold with high-contrast white/silver fills and a
+     *    deep opaque midnight-navy halo (rgba(6, 13, 24, 0.95), width 2.0..2.2px) that stays crisp
+     *    over bright green, yellow, orange, and red temperature fields.
      */
-    val FALLBACK_DARK_VECTOR_STYLE_JSON: String = """
+    fun tuneBasemapStyleForWeatherLegibility(rawStyleJson: String): String {
+        return try {
+            val root = JsonParser.parseString(rawStyleJson).asJsonObject
+            val layers = root.getAsJsonArray("layers") ?: return rawStyleJson
+            val singleLineTextField = buildSingleLineCoalesceTextField()
+            val boldFontArray = JsonArray().apply { add("Noto Sans Bold") }
+            val zeroOffsetArray = JsonArray().apply {
+                add(0)
+                add(0)
+            }
+
+            for (element in layers) {
+                if (!element.isJsonObject) continue
+                val layer = element.asJsonObject
+                val id = layer.get("id")?.takeIf { !it.isJsonNull }?.asString ?: continue
+                val type = layer.get("type")?.takeIf { !it.isJsonNull }?.asString ?: ""
+
+                when (id) {
+                    "place_continent" -> {
+                        layer.addProperty("minzoom", 1.0)
+                        layer.addProperty("maxzoom", 3.5)
+                    }
+                    "place_country_major" -> {
+                        layer.addProperty("minzoom", 2.0)
+                        layer.addProperty("maxzoom", 6.5)
+                    }
+                    "place_country_minor", "place_country_other", "place_country" -> {
+                        layer.addProperty("minzoom", 3.5)
+                        layer.addProperty("maxzoom", 7.5)
+                    }
+                    "place_state" -> {
+                        layer.addProperty("minzoom", 5.2)
+                        layer.addProperty("maxzoom", 8.5)
+                    }
+                    "place_city_large" -> {
+                        layer.addProperty("minzoom", 3.2)
+                        layer.addProperty("maxzoom", 13.5)
+                    }
+                    "place_city" -> {
+                        layer.addProperty("minzoom", 5.8)
+                        layer.addProperty("maxzoom", 14.0)
+                    }
+                    "place_town" -> {
+                        layer.addProperty("minzoom", 7.5)
+                        layer.addProperty("maxzoom", 15.0)
+                    }
+                    "place_village" -> {
+                        layer.addProperty("minzoom", 9.5)
+                        layer.addProperty("maxzoom", 15.0)
+                    }
+                    "place_suburb" -> {
+                        layer.addProperty("minzoom", 10.5)
+                        layer.addProperty("maxzoom", 15.0)
+                    }
+                    "place_other" -> {
+                        layer.addProperty("minzoom", 11.5)
+                        layer.addProperty("maxzoom", 15.0)
+                    }
+                    "water_name", "highway_name_other", "highway_name_mid" -> {
+                        layer.addProperty("minzoom", 9.0)
+                    }
+                }
+
+                if (type != "symbol") continue
+                val isPlaceLayer = id.startsWith("place_")
+                val isWaterOrRoadName = id == "water_name" || id.startsWith("highway_name")
+                if (!isPlaceLayer && !isWaterOrRoadName) continue
+
+                val layout = layer.getAsJsonObject("layout") ?: JsonObject().also { layer.add("layout", it) }
+                val paint = layer.getAsJsonObject("paint") ?: JsonObject().also { layer.add("paint", it) }
+
+                layout.add("text-field", singleLineTextField.deepCopy())
+                layout.addProperty("text-allow-overlap", false)
+                layout.addProperty("text-ignore-placement", false)
+
+                if (isPlaceLayer) {
+                    val isCountryOrState = id == "place_continent" ||
+                        id.startsWith("place_country") ||
+                        id == "place_state"
+                    val isMajorCity = id == "place_city_large"
+                    val isSecondaryCity = id == "place_city"
+
+                    val textPadding = when {
+                        isCountryOrState -> 16
+                        isMajorCity -> 14
+                        isSecondaryCity -> 12
+                        else -> 10
+                    }
+                    layout.addProperty("text-padding", textPadding)
+                    layout.addProperty("text-anchor", "center")
+                    layout.add("text-offset", zeroOffsetArray.deepCopy())
+                    layout.remove("icon-image")
+                    layout.remove("icon-size")
+                    layout.remove("icon-optional")
+
+                    if (isCountryOrState) {
+                        layout.addProperty("text-transform", "uppercase")
+                        layout.addProperty("text-letter-spacing", 0.08)
+                    } else {
+                        layout.addProperty("text-transform", "none")
+                        layout.addProperty("text-letter-spacing", 0.02)
+                    }
+
+                    layout.add("text-font", boldFontArray.deepCopy())
+
+                    val textColor = when (id) {
+                        "place_city_large", "place_city", "place_country_major" -> "#F8FAFC"
+                        "place_country_minor", "place_country_other", "place_country", "place_state", "place_continent" -> "#CBD5E1"
+                        else -> "#E2E8F0"
+                    }
+                    val haloWidth = when (id) {
+                        "place_city_large", "place_city", "place_country_major", "place_country_minor", "place_country_other", "place_country", "place_continent" -> 2.2
+                        else -> 2.0
+                    }
+
+                    paint.addProperty("text-color", textColor)
+                    paint.addProperty("text-halo-color", "rgba(6, 13, 24, 0.95)")
+                    paint.addProperty("text-halo-width", haloWidth)
+                    paint.addProperty("text-halo-blur", 0.4)
+                } else {
+                    paint.addProperty("text-halo-color", "rgba(6, 13, 24, 0.95)")
+                    paint.addProperty("text-halo-width", 2.0)
+                    paint.addProperty("text-halo-blur", 0.4)
+                }
+            }
+            root.toString()
+        } catch (_: Exception) {
+            rawStyleJson
+        }
+    }
+
+    private fun buildSingleLineCoalesceTextField(): JsonArray {
+        fun getExpr(prop: String): JsonArray = JsonArray().apply {
+            add("get")
+            add(prop)
+        }
+        return JsonArray().apply {
+            add("coalesce")
+            add(getExpr("name:en"))
+            add(getExpr("name_en"))
+            add(getExpr("name:latin"))
+            add(getExpr("name"))
+        }
+    }
+
+    /**
+     * Minimal, zero-sprite midnight-blue OpenFreeMap vector style preserving the exact
+     * `boundary_state` label anchor and full progressive zoom-tiered place hierarchy
+     * so weather overlays stay underneath borders and legible city names even if the remote
+     * Fiord style endpoint or sprite sheet hiccups.
+     */
+    val FALLBACK_DARK_VECTOR_STYLE_JSON: String = tuneBasemapStyleForWeatherLegibility(
+        """
         {
           "version": 8,
           "name": "Almanac Midnight Vector",
@@ -617,21 +781,119 @@ object WeatherTileSourceResolver {
               }
             },
             {
+              "id": "water_name",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "water_name",
+              "minzoom": 9.0,
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": 11
+              },
+              "paint": {
+                "text-color": "#94A3B8",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.0,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "highway_name_other",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "transportation_name",
+              "minzoom": 9.0,
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": 10
+              },
+              "paint": {
+                "text-color": "#94A3B8",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.0,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "place_other",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 11.5,
+              "maxzoom": 15.0,
+              "filter": ["in", "class", "neighbourhood", "hamlet", "isolated_dwelling"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 11.5, 10, 14, 12]
+              },
+              "paint": {
+                "text-color": "#E2E8F0",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.0,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "place_suburb",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 10.5,
+              "maxzoom": 15.0,
+              "filter": ["==", "class", "suburb"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 10.5, 10.5, 14, 12.5]
+              },
+              "paint": {
+                "text-color": "#E2E8F0",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.0,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "place_village",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 9.5,
+              "maxzoom": 15.0,
+              "filter": ["==", "class", "village"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 9.5, 10.5, 13, 12.5]
+              },
+              "paint": {
+                "text-color": "#E2E8F0",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.0,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
               "id": "place_town",
               "type": "symbol",
               "source": "openmaptiles",
               "source-layer": "place",
-              "minzoom": 6,
-              "filter": ["in", "class", "town", "village"],
+              "minzoom": 7.5,
+              "maxzoom": 15.0,
+              "filter": ["==", "class", "town"],
               "layout": {
-                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
-                "text-font": ["Noto Sans Regular"],
-                "text-size": ["interpolate", ["linear"], ["zoom"], 6, 10, 12, 13]
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 7.5, 11, 12, 13.5]
               },
               "paint": {
-                "text-color": "#CBD5E1",
-                "text-halo-color": "#0A1422",
-                "text-halo-width": 1.3
+                "text-color": "#E2E8F0",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.0,
+                "text-halo-blur": 0.4
               }
             },
             {
@@ -639,38 +901,123 @@ object WeatherTileSourceResolver {
               "type": "symbol",
               "source": "openmaptiles",
               "source-layer": "place",
-              "minzoom": 3,
-              "filter": ["==", "class", "city"],
+              "minzoom": 5.8,
+              "maxzoom": 14.0,
+              "filter": ["all", ["==", "class", "city"], [">", "rank", 3]],
               "layout": {
-                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
-                "text-font": ["Noto Sans Regular"],
-                "text-size": ["interpolate", ["linear"], ["zoom"], 3, 11, 10, 16]
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 5.8, 11.5, 11, 15.5]
               },
               "paint": {
                 "text-color": "#F8FAFC",
-                "text-halo-color": "#0A1422",
-                "text-halo-width": 1.6
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.2,
+                "text-halo-blur": 0.4
               }
             },
             {
-              "id": "place_country",
+              "id": "place_city_large",
               "type": "symbol",
               "source": "openmaptiles",
               "source-layer": "place",
-              "maxzoom": 7,
-              "filter": ["==", "class", "country"],
+              "minzoom": 3.2,
+              "maxzoom": 13.5,
+              "filter": ["all", ["==", "class", "city"], ["<=", "rank", 3]],
               "layout": {
-                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
-                "text-font": ["Noto Sans Regular"],
-                "text-size": ["interpolate", ["linear"], ["zoom"], 2, 10, 6, 14]
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 3.2, 11.5, 10, 17]
               },
               "paint": {
-                "text-color": "#A7C0DB",
-                "text-halo-color": "#0A1422",
-                "text-halo-width": 1.5
+                "text-color": "#F8FAFC",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.2,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "place_state",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 5.2,
+              "maxzoom": 8.5,
+              "filter": ["==", "class", "state"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 5.2, 10.5, 8.5, 13]
+              },
+              "paint": {
+                "text-color": "#CBD5E1",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.0,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "place_country_minor",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 3.5,
+              "maxzoom": 7.5,
+              "filter": ["all", ["==", "class", "country"], [">", "rank", 2]],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 3.5, 10.5, 7, 13.5]
+              },
+              "paint": {
+                "text-color": "#CBD5E1",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.2,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "place_country_major",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 2.0,
+              "maxzoom": 6.5,
+              "filter": ["all", ["==", "class", "country"], ["<=", "rank", 2]],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 2, 11, 6, 15]
+              },
+              "paint": {
+                "text-color": "#F8FAFC",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.2,
+                "text-halo-blur": 0.4
+              }
+            },
+            {
+              "id": "place_continent",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 1.0,
+              "maxzoom": 3.5,
+              "filter": ["==", "class", "continent"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name_en"], ["get", "name:latin"], ["get", "name"]],
+                "text-font": ["Noto Sans Bold"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 1, 11, 3.5, 14]
+              },
+              "paint": {
+                "text-color": "#CBD5E1",
+                "text-halo-color": "rgba(6, 13, 24, 0.95)",
+                "text-halo-width": 2.2,
+                "text-halo-blur": 0.4
               }
             }
           ]
         }
-    """.trimIndent()
+        """.trimIndent()
+    )
 }

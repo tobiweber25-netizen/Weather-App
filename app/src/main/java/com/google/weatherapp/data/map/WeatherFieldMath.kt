@@ -569,17 +569,20 @@ object WeatherFieldMath {
                 interpolateColorStops(value = value, stops = CLOUD_COLOR_STOPS, alphaScale = alpha)
             }
         }
-        WeatherMapLayer.TEMPERATURE -> interpolateColorStops(
-            value = value,
-            stops = TEMP_COLOR_STOPS,
-            alphaScale = 0.80f
-        )
+        WeatherMapLayer.TEMPERATURE -> mapTemperatureToArgb(temperatureC = value, alphaScale = 0.80f)
         WeatherMapLayer.PRESSURE -> interpolateColorStops(
             value = value,
             stops = PRESSURE_COLOR_STOPS,
             alphaScale = 0.56f
         )
     }
+
+    fun mapTemperatureToArgb(temperatureC: Float, alphaScale: Float = 1.0f): Int =
+        interpolateColorStops(
+            value = temperatureC,
+            stops = TEMP_COLOR_STOPS,
+            alphaScale = alphaScale
+        )
 
     private fun interpolateColorStops(
         value: Float,
@@ -610,6 +613,166 @@ object WeatherFieldMath {
     }
 
     /**
+     * Samples real interpolated temperatures at visible priority places (focused city + saved cities)
+     * plus a clean interior lattice of regional points across the active [viewport] (or base grid bounds),
+     * mapping each spot to its exact thermal color stop for direct on-map temperature pills.
+     */
+    fun extractTemperatureSpots(
+        grid: WeatherGridField,
+        hourIndex: Int,
+        viewport: MapViewportBounds? = null,
+        priorityPlaces: List<Pair<String, GeoPoint>> = emptyList()
+    ): List<TemperatureSpotMarker> = extractTemperatureSpots(
+        composite = WeatherGridComposite(grid),
+        hourIndex = hourIndex,
+        viewport = viewport,
+        priorityPlaces = priorityPlaces
+    )
+
+    fun extractTemperatureSpots(
+        composite: WeatherGridComposite,
+        hourIndex: Int,
+        viewport: MapViewportBounds? = null,
+        priorityPlaces: List<Pair<String, GeoPoint>> = emptyList()
+    ): List<TemperatureSpotMarker> {
+        val base = composite.baseGrid
+        if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2) return emptyList()
+        val safeHour = hourIndex.coerceIn(0, base.hourCount - 1)
+        val detailHours = resolveDetailHourIndices(composite, safeHour)
+
+        val clippedSouth = (viewport?.south ?: base.southLat).coerceIn(base.southLat, base.northLat)
+        val clippedNorth = (viewport?.north ?: base.northLat).coerceIn(base.southLat, base.northLat)
+        val clippedWest = (viewport?.west ?: base.westLon).coerceIn(base.westLon, base.eastLon)
+        val clippedEast = (viewport?.east ?: base.eastLon).coerceIn(base.westLon, base.eastLon)
+
+        val hasValidViewportIntersection =
+            (clippedNorth - clippedSouth) >= 0.05 && (clippedEast - clippedWest) >= 0.05
+        val south = if (hasValidViewportIntersection) clippedSouth else base.southLat
+        val north = if (hasValidViewportIntersection) clippedNorth else base.northLat
+        val west = if (hasValidViewportIntersection) clippedWest else base.westLon
+        val east = if (hasValidViewportIntersection) clippedEast else base.eastLon
+
+        val latSpan = (north - south).coerceAtLeast(1e-4)
+        val lonSpan = (east - west).coerceAtLeast(1e-4)
+
+        val spots = mutableListOf<TemperatureSpotMarker>()
+
+        // 1. Visible priority cities first so named locations always win screen-space collision checks
+        for ((rawLabel, point) in priorityPlaces) {
+            val lat = point.latitude
+            val lon = point.longitude
+            if (lat !in base.southLat..base.northLat || lon !in base.westLon..base.eastLon) continue
+            if (lat !in south..north || lon !in west..east) continue
+            val isDuplicate = spots.any { existing ->
+                abs(existing.latitude - lat) < 0.02 && abs(existing.longitude - lon) < 0.02
+            }
+            if (isDuplicate) continue
+            val exactTemp = sampleCompositeScalar(
+                composite = composite,
+                baseHourIndex = safeHour,
+                detailHours = detailHours,
+                latitude = lat,
+                longitude = lon,
+                smooth = true
+            ) { it.temperatureC }
+            spots.add(
+                TemperatureSpotMarker(
+                    latitude = lat,
+                    longitude = lon,
+                    temperatureC = exactTemp.roundToInt(),
+                    exactTemperatureC = exactTemp.toDouble(),
+                    colorArgb = mapTemperatureToArgb(exactTemp, alphaScale = 1.0f),
+                    placeLabel = rawLabel.trim().takeIf { it.isNotEmpty() },
+                    isPriorityCity = true
+                )
+            )
+        }
+
+        // 2. Interior 4x5 regional lattice across the active viewport bounds
+        val latticeRows = 4
+        val latticeCols = 5
+        val priorityGuardLat = latSpan * 0.07
+        val priorityGuardLon = lonSpan * 0.07
+
+        for (r in 0 until latticeRows) {
+            val lat = south + ((r + 0.5) / latticeRows) * latSpan
+            for (c in 0 until latticeCols) {
+                val lon = west + ((c + 0.5) / latticeCols) * lonSpan
+                val nearPriority = spots.any { existing ->
+                    existing.isPriorityCity &&
+                        abs(existing.latitude - lat) <= priorityGuardLat &&
+                        abs(existing.longitude - lon) <= priorityGuardLon
+                }
+                if (nearPriority) continue
+                val exactTemp = sampleCompositeScalar(
+                    composite = composite,
+                    baseHourIndex = safeHour,
+                    detailHours = detailHours,
+                    latitude = lat,
+                    longitude = lon,
+                    smooth = true
+                ) { it.temperatureC }
+                spots.add(
+                    TemperatureSpotMarker(
+                        latitude = lat,
+                        longitude = lon,
+                        temperatureC = exactTemp.roundToInt(),
+                        exactTemperatureC = exactTemp.toDouble(),
+                        colorArgb = mapTemperatureToArgb(exactTemp, alphaScale = 1.0f),
+                        placeLabel = null,
+                        isPriorityCity = false
+                    )
+                )
+            }
+        }
+        return spots
+    }
+
+    /**
+     * Marching Squares contour extractor producing smooth real temperature isotherms
+     * (every [stepC] °C across -24°C..+48°C, flagging 0°C with [IsothermContourLine.isFreezingLine])
+     * from an upsampled smooth composite temperature field.
+     */
+    fun extractIsothermContours(
+        grid: WeatherGridField,
+        hourIndex: Int,
+        stepC: Int = 4,
+        sampleRes: Int = 29
+    ): List<IsothermContourLine> = extractIsothermContours(
+        composite = WeatherGridComposite(grid),
+        hourIndex = hourIndex,
+        stepC = stepC,
+        sampleRes = sampleRes
+    )
+
+    fun extractIsothermContours(
+        composite: WeatherGridComposite,
+        hourIndex: Int,
+        stepC: Int = 4,
+        sampleRes: Int = 29
+    ): List<IsothermContourLine> {
+        val safeStep = stepC.coerceAtLeast(1)
+        return extractScalarContours(
+            composite = composite,
+            hourIndex = hourIndex,
+            step = safeStep,
+            sampleRes = sampleRes,
+            minValidValue = -85f,
+            maxValidValue = 68f,
+            minRangeSpan = 1.2f,
+            minLevelClamp = -24,
+            maxLevelClamp = 48,
+            selector = WeatherGridField::temperatureC
+        ) { level, poly ->
+            IsothermContourLine(
+                temperatureC = level,
+                isFreezingLine = level == 0,
+                points = poly
+            )
+        }
+    }
+
+    /**
      * Marching Squares contour extractor producing smooth real sea-level pressure isobars
      * (every 4 hPa) from an upsampled smooth composite pressure field.
      */
@@ -631,6 +794,36 @@ object WeatherFieldMath {
         stepHpa: Int = 4,
         sampleRes: Int = 29
     ): List<IsobarContourLine> {
+        val safeStep = stepHpa.coerceAtLeast(1)
+        return extractScalarContours(
+            composite = composite,
+            hourIndex = hourIndex,
+            step = safeStep,
+            sampleRes = sampleRes,
+            minValidValue = 850f,
+            maxValidValue = 1100f,
+            minRangeSpan = 1.5f,
+            minLevelClamp = 860,
+            maxLevelClamp = 1084,
+            selector = WeatherGridField::pressureHpa
+        ) { level, poly ->
+            IsobarContourLine(pressureHpa = level, points = poly)
+        }
+    }
+
+    private fun <T> extractScalarContours(
+        composite: WeatherGridComposite,
+        hourIndex: Int,
+        step: Int,
+        sampleRes: Int,
+        minValidValue: Float,
+        maxValidValue: Float,
+        minRangeSpan: Float,
+        minLevelClamp: Int,
+        maxLevelClamp: Int,
+        selector: (WeatherGridField) -> FloatArray,
+        builder: (level: Int, points: List<GeoPoint>) -> T
+    ): List<T> {
         val base = composite.baseGrid
         if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2) return emptyList()
         val safeHour = hourIndex.coerceIn(0, base.hourCount - 1)
@@ -652,26 +845,36 @@ object WeatherFieldMath {
 
         // Upsample onto a fine smooth lattice so contour lines curve gracefully like Windy
         val fine = FloatArray(effectiveRes * effectiveRes)
-        var minP = Float.MAX_VALUE
-        var maxP = -Float.MAX_VALUE
+        var minVal = Float.MAX_VALUE
+        var maxVal = -Float.MAX_VALUE
         val inv = 1.0 / (effectiveRes - 1)
         for (r in 0 until effectiveRes) {
             val lat = base.southLat + (r * inv) * latSpan
             for (c in 0 until effectiveRes) {
                 val lon = base.westLon + (c * inv) * lonSpan
-                val p = sampleCompositeScalar(composite, safeHour, detailHours, lat, lon, smooth = true) { it.pressureHpa }
-                fine[r * effectiveRes + c] = p
-                if (p < minP) minP = p
-                if (p > maxP) maxP = p
+                val v = sampleCompositeScalar(
+                    composite = composite,
+                    baseHourIndex = safeHour,
+                    detailHours = detailHours,
+                    latitude = lat,
+                    longitude = lon,
+                    smooth = true,
+                    selector = selector
+                )
+                fine[r * effectiveRes + c] = v
+                if (v < minVal) minVal = v
+                if (v > maxVal) maxVal = v
             }
         }
-        if (minP < 850f || maxP > 1100f || (maxP - minP) < 1.5f) return emptyList()
+        if (minVal < minValidValue || maxVal > maxValidValue || (maxVal - minVal) < minRangeSpan) {
+            return emptyList()
+        }
 
-        val firstLevel = (ceil(minP / stepHpa.toDouble()).toInt()) * stepHpa
-        val lastLevel = (floor(maxP / stepHpa.toDouble()).toInt()) * stepHpa
+        val firstLevel = ((ceil(minVal / step.toDouble()).toInt()) * step).coerceAtLeast(minLevelClamp)
+        val lastLevel = ((floor(maxVal / step.toDouble()).toInt()) * step).coerceAtMost(maxLevelClamp)
         if (firstLevel > lastLevel) return emptyList()
 
-        val contours = mutableListOf<IsobarContourLine>()
+        val contours = mutableListOf<T>()
 
         var level = firstLevel
         while (level <= lastLevel) {
@@ -737,11 +940,11 @@ object WeatherFieldMath {
                 val stitched = stitchSegmentsIntoPolylines(segments)
                 stitched.forEach { poly ->
                     if (poly.size >= 2) {
-                        contours.add(IsobarContourLine(pressureHpa = level, points = poly))
+                        contours.add(builder(level, poly))
                     }
                 }
             }
-            level += stepHpa
+            level += step
         }
         return contours
     }

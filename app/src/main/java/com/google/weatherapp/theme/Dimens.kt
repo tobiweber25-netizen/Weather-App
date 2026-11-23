@@ -166,4 +166,14 @@ object MapTokens {
     val WindParticleStrokeMin: Dp = 1.1.dp
     val WindParticleStrokeMax: Dp = 2.1.dp
     val IsobarLineWidthPx: Float = 2.2f
+    val IsothermLineWidthPx: Float = 1.6f
+    val IsothermFreezingLineWidthPx: Float = 2.4f
+    val TempBadgeMinSeparation: Dp = 88.dp
+    val TempBadgeEdgeMarginTop: Dp = 118.dp
+    val TempBadgeEdgeMarginBottom: Dp = 148.dp
+    val TempBadgeEdgeMarginHorizontal: Dp = 28.dp
+    val TempBadgeColorDotSize: Dp = 8.dp
+    val TempBadgeApproxHalfWidth: Dp = 26.dp
+    val TempBadgePriorityApproxHalfWidth: Dp = 54.dp
+    val TempBadgeApproxHalfHeight: Dp = 14.dp
 }

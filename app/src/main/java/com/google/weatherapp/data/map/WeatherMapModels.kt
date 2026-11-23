@@ -296,6 +296,22 @@ data class PressureCenterMarker(
     val longitude: Double
 )
 
+data class TemperatureSpotMarker(
+    val latitude: Double,
+    val longitude: Double,
+    val temperatureC: Int,
+    val exactTemperatureC: Double,
+    val colorArgb: Int,
+    val placeLabel: String? = null,
+    val isPriorityCity: Boolean = false
+)
+
+data class IsothermContourLine(
+    val temperatureC: Int,
+    val isFreezingLine: Boolean,
+    val points: List<GeoPoint>
+)
+
 sealed interface WeatherMapGridStatus {
     data object Idle : WeatherMapGridStatus
     data object Loading : WeatherMapGridStatus

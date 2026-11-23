@@ -313,6 +313,8 @@ val MapTempWarm = Color(0xFFFACC15)
 val MapTempHot = Color(0xFFFB923C)
 val MapTempScorching = Color(0xFFEF4444)
 val MapTempExtreme = Color(0xFF991B1B)
+val MapIsothermStroke = Color(0xBFEEF6FF)
+val MapIsothermFreezingStroke = Color(0xEB7CEEFF)
 
 // Cloud Cover & Sea-Level Pressure Spectrum
 val MapCloudThin = Color(0x55CBD5E1)

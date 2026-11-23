@@ -29,10 +29,12 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.weatherapp.data.map.*
 import com.google.weatherapp.data.model.SavedLocation
@@ -85,6 +87,19 @@ fun WeatherMapScreen(
     val initialZone = remember(launchConfig.sessionId) {
         WeatherMapper.parseZoneIdOrNull(initialTimezone) ?: ZoneId.systemDefault()
     }
+    val initialPriorityPlaces = remember(launchConfig.sessionId, gpsLocation, savedLocations) {
+        buildList {
+            if (initialPlaceName.isNotBlank()) {
+                add(initialPlaceName to GeoPoint(initialLatitude, initialLongitude))
+            }
+            gpsLocation?.let { loc ->
+                add(loc.name to GeoPoint(loc.latitude, loc.longitude))
+            }
+            savedLocations.forEach { loc ->
+                add(loc.name to GeoPoint(loc.latitude, loc.longitude))
+            }
+        }
+    }
     val controller = remember(launchConfig.sessionId) {
         WeatherMapStateHolder(
             scope = coroutineScope,
@@ -92,7 +107,8 @@ fun WeatherMapScreen(
             initialLatitude = initialLatitude,
             initialLongitude = initialLongitude,
             initialPlaceName = initialPlaceName,
-            initialZoneId = initialZone
+            initialZoneId = initialZone,
+            initialPriorityPlaces = initialPriorityPlaces
         )
     }
     DisposableEffect(controller) {
@@ -108,6 +124,22 @@ fun WeatherMapScreen(
     var isBasemapReady by remember(launchConfig.sessionId) { mutableStateOf(false) }
     var basemapError by remember(launchConfig.sessionId) { mutableStateOf<String?>(null) }
     var styleReloadToken by remember(launchConfig.sessionId) { mutableLongStateOf(0L) }
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+
+    LaunchedEffect(uiState.focusedPlaceName, focusedAnchorLat, focusedAnchorLon, gpsLocation, savedLocations) {
+        val places = buildList {
+            if (uiState.focusedPlaceName.isNotBlank()) {
+                add(uiState.focusedPlaceName to GeoPoint(focusedAnchorLat, focusedAnchorLon))
+            }
+            gpsLocation?.let { loc ->
+                add(loc.name to GeoPoint(loc.latitude, loc.longitude))
+            }
+            savedLocations.forEach { loc ->
+                add(loc.name to GeoPoint(loc.latitude, loc.longitude))
+            }
+        }
+        controller.updatePriorityPlaces(places)
+    }
 
     val density = LocalDensity.current
 
@@ -115,6 +147,7 @@ fun WeatherMapScreen(
         modifier = modifier
             .fillMaxSize()
             .background(MapCanvasFallbackBg)
+            .onSizeChanged { containerSize = it }
     ) {
         // 1. Full-bleed native GPU Fiord vector map + weather overlays + 60fps wind particles
         MapLibreWeatherCanvas(
@@ -131,16 +164,62 @@ fun WeatherMapScreen(
             modifier = Modifier.fillMaxSize()
         )
 
-        // 2. Projected Luminous Glass overlays (active city pin, Pressure H/L centers, tapped reticle)
+        // 2. Projected Luminous Glass overlays (active city pin, Temp value pills, Pressure H/L centers, tapped reticle)
         val currentProjector = projector
         if (currentProjector != null) {
-            // Focus city subtle anchor badge
-            val focusPt = currentProjector(LatLng(focusedAnchorLat, focusedAnchorLon))
-            if (focusPt != null && focusPt.visible) {
-                MapCityDotMarker(
-                    xPx = focusPt.xPx,
-                    yPx = focusPt.yPx
-                )
+            val showTempSpots = uiState.selectedLayer == WeatherMapLayer.TEMPERATURE && uiState.showTemperatureBadges
+            // Focus city subtle anchor badge (yields to named priority TemperatureSpotBadge when Temp badges are active)
+            if (!showTempSpots) {
+                val focusPt = currentProjector(LatLng(focusedAnchorLat, focusedAnchorLon))
+                if (focusPt != null && focusPt.visible) {
+                    MapCityDotMarker(
+                        xPx = focusPt.xPx,
+                        yPx = focusPt.yPx
+                    )
+                }
+            }
+
+            // Direct On-Map Temperature Value Badges with deterministic screen-space anti-collision
+            if (showTempSpots && uiState.temperatureSpots.isNotEmpty()) {
+                val minSepPx = with(density) { MapTokens.TempBadgeMinSeparation.toPx() }
+                val minSepSq = minSepPx * minSepPx
+                val topMarginPx = with(density) { MapTokens.TempBadgeEdgeMarginTop.toPx() }
+                val bottomMarginPx = with(density) { MapTokens.TempBadgeEdgeMarginBottom.toPx() }
+                val leftMarginPx = with(density) { MapTokens.TempBadgeEdgeMarginHorizontal.toPx() }
+                val rightMarginPx = with(density) {
+                    (MapTokens.LayerRailWidth + MapTokens.TempBadgeEdgeMarginHorizontal).toPx()
+                }
+                val acceptedScreenPoints = mutableListOf<Pair<Float, Float>>()
+
+                uiState.temperatureSpots.forEach { spot ->
+                    val pt = currentProjector(LatLng(spot.latitude, spot.longitude))
+                    if (pt != null && pt.visible) {
+                        val withinSafeHud = if (containerSize.width > 0 && containerSize.height > 0) {
+                            pt.xPx >= leftMarginPx &&
+                                pt.xPx <= (containerSize.width - rightMarginPx) &&
+                                pt.yPx >= topMarginPx &&
+                                pt.yPx <= (containerSize.height - bottomMarginPx)
+                        } else {
+                            true
+                        }
+                        if (withinSafeHud) {
+                            val collides = acceptedScreenPoints.any { (ax, ay) ->
+                                val dx = ax - pt.xPx
+                                val dy = ay - pt.yPx
+                                (dx * dx + dy * dy) < minSepSq
+                            }
+                            if (!collides) {
+                                acceptedScreenPoints.add(pt.xPx to pt.yPx)
+                                TemperatureSpotBadge(
+                                    spot = spot,
+                                    xPx = pt.xPx,
+                                    yPx = pt.yPx,
+                                    onClick = { controller.onMapTapped(spot.latitude, spot.longitude) }
+                                )
+                            }
+                        }
+                    }
+                }
             }
 
             // Real High / Low sea-level pressure centers on Pressure layer
@@ -443,7 +522,22 @@ fun WeatherMapScreen(
                         }
                     }
 
-                    WeatherMapLayer.TEMPERATURE, WeatherMapLayer.PRESSURE -> Unit
+                    WeatherMapLayer.TEMPERATURE -> {
+                        MapSubModeChip(
+                            label = "Temp Values",
+                            icon = Icons.Default.Thermostat,
+                            selected = uiState.showTemperatureBadges,
+                            onClick = { controller.toggleTemperatureBadges() }
+                        )
+                        MapSubModeChip(
+                            label = "Contours (4°C)",
+                            icon = Icons.Default.Timeline,
+                            selected = uiState.showIsotherms,
+                            onClick = { controller.toggleIsotherms() }
+                        )
+                    }
+
+                    WeatherMapLayer.PRESSURE -> Unit
                 }
             }
 
@@ -1004,6 +1098,66 @@ private fun PressureCenterBadge(
             text = "${center.pressureHpa}",
             style = MaterialTheme.typography.labelSmall,
             color = SkyTextPrimary
+        )
+    }
+}
+
+@Composable
+private fun TemperatureSpotBadge(
+    spot: TemperatureSpotMarker,
+    xPx: Float,
+    yPx: Float,
+    onClick: () -> Unit
+) {
+    val density = LocalDensity.current
+    val isNamedCity = spot.isPriorityCity && !spot.placeLabel.isNullOrBlank()
+    val halfWidthPx = with(density) {
+        (if (isNamedCity) MapTokens.TempBadgePriorityApproxHalfWidth else MapTokens.TempBadgeApproxHalfWidth).toPx()
+    }
+    val halfHeightPx = with(density) { MapTokens.TempBadgeApproxHalfHeight.toPx() }
+    val thermalColor = Color(spot.colorArgb)
+    val labelText = if (isNamedCity) {
+        "${spot.placeLabel} · ${spot.temperatureC}°"
+    } else {
+        "${spot.temperatureC}°"
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall),
+        modifier = Modifier
+            .offset {
+                IntOffset(
+                    (xPx - halfWidthPx).roundToInt(),
+                    (yPx - halfHeightPx).roundToInt()
+                )
+            }
+            .luminousGlass(
+                cornerRadius = CornerTokens.Pill,
+                accentBorderColor = if (isNamedCity) GlassActiveBorderGold else thermalColor.copy(alpha = 0.72f),
+                overrideTopColor = if (isNamedCity) MapHudElevatedTop else MapPinSavedCityBg,
+                overrideBottomColor = MapHudSurfaceBottom
+            )
+            .clickable(onClick = onClick)
+            .padding(
+                horizontal = if (isNamedCity) SpacingTokens.Compact else SpacingTokens.Small,
+                vertical = SpacingTokens.ExtraSmall
+            )
+    ) {
+        Box(
+            modifier = Modifier
+                .size(MapTokens.TempBadgeColorDotSize)
+                .clip(CircleShape)
+                .background(thermalColor)
+                .border(BorderTokens.Hairline, MapCanvasFallbackBg, CircleShape)
+        )
+        Text(
+            text = labelText,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            color = SkyTextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
