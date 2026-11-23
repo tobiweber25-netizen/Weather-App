@@ -70,7 +70,7 @@ class WeatherMapStateHolder(
     initialLongitude: Double,
     initialPlaceName: String,
     initialZoneId: ZoneId = ZoneId.systemDefault(),
-    private val gridClient: WeatherMapGridClient = WeatherMapGridClient()
+    private val gridClient: WeatherMapGridClient = WeatherMapGridClient.sharedInstance
 ) {
     private val _uiState = MutableStateFlow(
         WeatherMapUiState(
@@ -95,6 +95,20 @@ class WeatherMapStateHolder(
     private var playbackJob: Job? = null
     private var lastViewport: MapViewportBounds? = null
 
+    init {
+        // Kick off weather grid loading at millisecond 0 in parallel with MapLibre init
+        val initialBounds = WeatherMapGridClient.estimateInitialViewport(initialLatitude, initialLongitude)
+        lastViewport = initialBounds
+        val cached = gridClient.findCachedGrid(initialBounds)
+        if (cached != null) {
+            applyLoadedGrid(cached)
+        } else {
+            fetchJob = scope.launch {
+                performGridFetch(initialBounds, forceRefresh = false)
+            }
+        }
+    }
+
     fun onViewportIdle(bounds: MapViewportBounds) {
         lastViewport = bounds
         _uiState.update { state ->
@@ -111,7 +125,7 @@ class WeatherMapStateHolder(
             )
         }
 
-        // Fast cache hit: avoid even scheduling debounce delay when viewport is already covered
+        // Fast cache hit: avoid scheduling any network fetch when viewport is already covered
         val cached = gridClient.findCachedGrid(bounds)
         if (cached != null) {
             if (_uiState.value.grid !== cached) {
@@ -122,9 +136,16 @@ class WeatherMapStateHolder(
             return
         }
 
+        // Avoid restarting an identical in-flight initial fetch when MapLibre settles on the starting box
+        if (fetchJob?.isActive == true && _uiState.value.grid == null) {
+            return
+        }
+
         fetchJob?.cancel()
         fetchJob = scope.launch {
-            delay(CAMERA_IDLE_DEBOUNCE_MS)
+            if (_uiState.value.grid != null) {
+                delay(CAMERA_IDLE_DEBOUNCE_MS)
+            }
             performGridFetch(bounds, forceRefresh = false)
         }
     }
@@ -382,8 +403,8 @@ class WeatherMapStateHolder(
     }
 
     companion object {
-        private const val CAMERA_IDLE_DEBOUNCE_MS = 450L
-        private const val FIELD_BITMAP_SIZE = 144
+        private const val CAMERA_IDLE_DEBOUNCE_MS = 350L
+        private const val FIELD_BITMAP_SIZE = 112
 
         private val HOUR_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:00", Locale.US)
         private val DAY_HOUR_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE HH:00", Locale.US)

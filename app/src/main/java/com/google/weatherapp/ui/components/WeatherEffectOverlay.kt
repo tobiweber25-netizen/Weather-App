@@ -31,18 +31,26 @@ fun WeatherEffectOverlay(
     if (effectType == WeatherEffectType.OFF || effectType == WeatherEffectType.AUTO) return
 
     val infiniteTransition = rememberInfiniteTransition(label = "atmospheric_canvas_transition")
+    val needsFastPhase = effectType == WeatherEffectType.RAIN ||
+        effectType == WeatherEffectType.THUNDERSTORM ||
+        effectType == WeatherEffectType.SNOW
 
-    val fastPhase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "fast_weather_phase"
-    )
+    // Hold State objects and read .value strictly inside Canvas draw lambda -> ZERO recompositions/sec!
+    val fastPhaseState = if (needsFastPhase) {
+        infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1800, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "fast_weather_phase"
+        )
+    } else {
+        null
+    }
 
-    val slowPhase by infiniteTransition.animateFloat(
+    val slowPhaseState = infiniteTransition.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
@@ -74,6 +82,8 @@ fun WeatherEffectOverlay(
     val cloudHeightPx = with(density) { EffectTokens.CloudBandHeight.toPx() }
 
     Canvas(modifier = modifier.fillMaxSize()) {
+        val slowPhase = slowPhaseState.value
+        val fastPhase = fastPhaseState?.value ?: 0f
         when (effectType) {
             WeatherEffectType.CLEAR_DAY -> drawClearDayAtmosphere(
                 slowPhase = slowPhase,

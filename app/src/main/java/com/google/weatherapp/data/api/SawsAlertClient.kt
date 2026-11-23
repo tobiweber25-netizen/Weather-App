@@ -16,6 +16,7 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import javax.xml.parsers.DocumentBuilderFactory
 import org.xml.sax.InputSource
 import org.w3c.dom.Element
@@ -25,16 +26,18 @@ import org.w3c.dom.Element
  * and matches them against the user's exact coordinates using polygon ray-casting.
  */
 class SawsAlertClient(
-    private val httpClient: OkHttpClient = ApiClient.okHttpClient
+    baseClient: OkHttpClient = ApiClient.okHttpClient
 ) {
+    private val httpClient: OkHttpClient = baseClient.newBuilder()
+        .connectTimeout(3, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
+        .callTimeout(3500, TimeUnit.MILLISECONDS)
+        .build()
+
     private data class CachedCapAlert(
         val fetchedAtMs: Long,
         val xml: String
     )
-
-    @Volatile private var cachedRssXml: String? = null
-    @Volatile private var cachedRssAtMs: Long = 0L
-    private val capXmlCache = mutableMapOf<String, CachedCapAlert>()
 
     suspend fun fetchAlertsForLocation(
         latitude: Double,
@@ -104,6 +107,10 @@ class SawsAlertClient(
         private const val CACHE_TTL_MS = 15 * 60 * 1000L
         private const val RECENT_RSS_WINDOW_HOURS = 36L
         private const val MAX_RECENT_CAPS_TO_FETCH = 8
+
+        @Volatile private var cachedRssXml: String? = null
+        @Volatile private var cachedRssAtMs: Long = 0L
+        private val capXmlCache = mutableMapOf<String, CachedCapAlert>()
 
         internal fun isWithinSouthAfrica(latitude: Double, longitude: Double): Boolean {
             return latitude in -35.5..-21.5 && longitude in 16.0..33.5

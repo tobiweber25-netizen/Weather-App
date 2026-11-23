@@ -98,4 +98,21 @@ class WeatherTileSourceResolverTest {
         assertTrue(futureClouds.useSmoothOpenMeteoField)
         assertTrue(futureClouds.sourceBadge.contains("Forecast Clouds · +12h"))
     }
+
+    @Test
+    fun fallbackDarkVectorStyleJson_isValidMapLibreStyleWithLabelAnchor() {
+        val root = com.google.gson.JsonParser.parseString(
+            WeatherTileSourceResolver.FALLBACK_DARK_VECTOR_STYLE_JSON
+        ).asJsonObject
+        assertEquals(8, root.get("version").asInt)
+        val layers = root.getAsJsonArray("layers")
+        assertTrue(layers.size() >= 6)
+        val layerIds = (0 until layers.size()).map { layers[it].asJsonObject.get("id").asString }
+        assertTrue(WeatherTileSourceResolver.FIORD_LABEL_ANCHOR_LAYER_ID in layerIds)
+        assertTrue("place_city" in layerIds)
+        assertTrue(
+            "Label anchor must come before city labels",
+            layerIds.indexOf(WeatherTileSourceResolver.FIORD_LABEL_ANCHOR_LAYER_ID) < layerIds.indexOf("place_city")
+        )
+    }
 }

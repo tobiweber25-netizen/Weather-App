@@ -1,9 +1,15 @@
 package com.google.weatherapp.data.map
 
+import com.google.weatherapp.data.api.ApiClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
+import java.util.concurrent.TimeUnit
 
 data class ExternalRasterTileLayerSpec(
     val id: String,
@@ -321,4 +327,181 @@ object WeatherTileSourceResolver {
         val pastInstant = nowUtc.truncatedTo(ChronoUnit.HOURS).plus(hourOffset.toLong(), ChronoUnit.HOURS)
         return ISO_UTC_FORMATTER.format(pastInstant)
     }
+
+    @Volatile private var cachedFiordStyleJson: String? = null
+    @Volatile private var cachedFiordFetchedAtMs: Long = 0L
+    private const val STYLE_CACHE_TTL_MS = 6L * 60L * 60L * 1000L
+
+    private val styleHttpClient: OkHttpClient by lazy {
+        ApiClient.okHttpClient.newBuilder()
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(6, TimeUnit.SECONDS)
+            .callTimeout(7, TimeUnit.SECONDS)
+            .build()
+    }
+
+    /**
+     * Fetches and caches OpenFreeMap's Fiord style JSON over our shared fast OkHttp pool
+     * so opening or reopening the map never stalls on MapLibre's internal style URI fetch.
+     * Falls back cleanly to our ultra-light inline midnight-blue OpenFreeMap vector style
+     * if Fiord is unreachable or returns an unexpected response.
+     */
+    suspend fun loadFiordOrFallbackStyleJson(forceRefresh: Boolean = false): Pair<String, Boolean> =
+        withContext(Dispatchers.IO) {
+            val now = System.currentTimeMillis()
+            val cached = cachedFiordStyleJson
+            if (!forceRefresh && cached != null && (now - cachedFiordFetchedAtMs) in 0..STYLE_CACHE_TTL_MS) {
+                return@withContext cached to true
+            }
+            val fetched = try {
+                val req = Request.Builder().url(OPENFREEMAP_FIORD_STYLE_URL).build()
+                styleHttpClient.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    val body = resp.body?.string()?.trim()
+                    if (body != null && body.startsWith("{") && body.contains("\"layers\"")) body else null
+                }
+            } catch (_: Exception) {
+                null
+            }
+            if (fetched != null) {
+                cachedFiordStyleJson = fetched
+                cachedFiordFetchedAtMs = now
+                fetched to true
+            } else if (cached != null) {
+                cached to true
+            } else {
+                FALLBACK_DARK_VECTOR_STYLE_JSON to false
+            }
+        }
+
+    /**
+     * Minimal, zero-sprite midnight-blue OpenFreeMap vector style preserving the exact
+     * `boundary_state` label anchor so weather overlays stay underneath borders and city names
+     * even if the remote Fiord style endpoint or sprite sheet hiccups.
+     */
+    val FALLBACK_DARK_VECTOR_STYLE_JSON: String = """
+        {
+          "version": 8,
+          "name": "Almanac Midnight Vector",
+          "sources": {
+            "openmaptiles": {
+              "type": "vector",
+              "url": "https://tiles.openfreemap.org/planet"
+            }
+          },
+          "glyphs": "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+          "layers": [
+            {
+              "id": "background",
+              "type": "background",
+              "paint": { "background-color": "#192638" }
+            },
+            {
+              "id": "water",
+              "type": "fill",
+              "source": "openmaptiles",
+              "source-layer": "water",
+              "paint": { "fill-color": "#0F1E31" }
+            },
+            {
+              "id": "waterway",
+              "type": "line",
+              "source": "openmaptiles",
+              "source-layer": "waterway",
+              "minzoom": 6,
+              "paint": { "line-color": "#142B46", "line-width": 1 }
+            },
+            {
+              "id": "road_major",
+              "type": "line",
+              "source": "openmaptiles",
+              "source-layer": "transportation",
+              "minzoom": 6,
+              "filter": ["in", "class", "motorway", "trunk", "primary"],
+              "paint": {
+                "line-color": "#2A3E57",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 6, 0.5, 12, 2.0]
+              }
+            },
+            {
+              "id": "boundary_state",
+              "type": "line",
+              "source": "openmaptiles",
+              "source-layer": "boundary",
+              "minzoom": 3,
+              "filter": ["all", ["==", "admin_level", 4], ["!=", "maritime", 1]],
+              "paint": {
+                "line-color": "#587394",
+                "line-width": 0.9,
+                "line-dasharray": [3, 2]
+              }
+            },
+            {
+              "id": "boundary_country",
+              "type": "line",
+              "source": "openmaptiles",
+              "source-layer": "boundary",
+              "filter": ["all", ["==", "admin_level", 2], ["!=", "maritime", 1]],
+              "paint": {
+                "line-color": "#82A3C7",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 2, 0.8, 8, 1.8]
+              }
+            },
+            {
+              "id": "place_town",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 6,
+              "filter": ["in", "class", "town", "village"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+                "text-font": ["Noto Sans Regular"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 6, 10, 12, 13]
+              },
+              "paint": {
+                "text-color": "#CBD5E1",
+                "text-halo-color": "#0A1422",
+                "text-halo-width": 1.3
+              }
+            },
+            {
+              "id": "place_city",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "minzoom": 3,
+              "filter": ["==", "class", "city"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+                "text-font": ["Noto Sans Regular"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 3, 11, 10, 16]
+              },
+              "paint": {
+                "text-color": "#F8FAFC",
+                "text-halo-color": "#0A1422",
+                "text-halo-width": 1.6
+              }
+            },
+            {
+              "id": "place_country",
+              "type": "symbol",
+              "source": "openmaptiles",
+              "source-layer": "place",
+              "maxzoom": 7,
+              "filter": ["==", "class", "country"],
+              "layout": {
+                "text-field": ["coalesce", ["get", "name:en"], ["get", "name"]],
+                "text-font": ["Noto Sans Regular"],
+                "text-size": ["interpolate", ["linear"], ["zoom"], 2, 10, 6, 14]
+              },
+              "paint": {
+                "text-color": "#A7C0DB",
+                "text-halo-color": "#0A1422",
+                "text-halo-width": 1.5
+              }
+            }
+          ]
+        }
+    """.trimIndent()
 }

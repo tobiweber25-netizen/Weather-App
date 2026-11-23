@@ -15,6 +15,8 @@ class WeatherLocalDataSource(
     private val gson: Gson = Gson()
 ) {
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private var memoizedRawMapJson: String? = null
+    private var memoizedLocationMap: Map<String, CachedWeatherEntry> = emptyMap()
 
     private data class CachedWeatherEntry(
         val timestampMs: Long,
@@ -217,6 +219,7 @@ class WeatherLocalDataSource(
             }
 
             val now = System.currentTimeMillis()
+            val singleDataJson = if (isGps || shouldUpdateActiveSlot()) gson.toJson(data) else null
             synchronized(CACHE_MAP_LOCK) {
                 val updatedMap = loadLocationCacheMap().toMutableMap()
                 updatedMap[cacheKey] = CachedWeatherEntry(timestampMs = now, data = data)
@@ -228,20 +231,26 @@ class WeatherLocalDataSource(
                     updatedMap.remove(oldestKey)
                 }
 
+                val mapJson = gson.toJson(updatedMap)
+                memoizedRawMapJson = mapJson
+                memoizedLocationMap = updatedMap
+
                 val editor = prefs.edit()
-                    .putString(KEY_LOCATION_CACHE_MAP, gson.toJson(updatedMap))
+                    .putString(KEY_LOCATION_CACHE_MAP, mapJson)
 
                 if (shouldUpdateActiveSlot()) {
                     editor
-                        .putString(KEY_CACHED_WEATHER, gson.toJson(data))
+                        .putString(KEY_CACHED_WEATHER, singleDataJson ?: gson.toJson(data))
                         .putLong(KEY_CACHE_TIMESTAMP, now)
                         .putString(KEY_CACHE_LOCATION, cacheKey)
                 }
+                if (isGps) {
+                    editor
+                        .putString(KEY_DEVICE_WEATHER, singleDataJson ?: gson.toJson(data))
+                        .putLong(KEY_DEVICE_WEATHER_TIMESTAMP, now)
+                }
                 editor.apply()
             }
-
-            // Dashboard is showing the device's own location: notifications can reuse this forecast.
-            if (isGps) saveDeviceWeather(data)
         } catch (_: Exception) {
             // Ignore cache write failure
         }
@@ -352,6 +361,8 @@ class WeatherLocalDataSource(
 
     fun clearCache() {
         synchronized(CACHE_MAP_LOCK) {
+            memoizedRawMapJson = null
+            memoizedLocationMap = emptyMap()
             prefs.edit()
                 .remove(KEY_CACHED_WEATHER)
                 .remove(KEY_CACHE_TIMESTAMP)
@@ -387,13 +398,24 @@ class WeatherLocalDataSource(
         "gps_%.2f,%.2f".format(Locale.US, latitude, longitude)
 
     private fun loadLocationCacheMap(): Map<String, CachedWeatherEntry> {
-        val json = prefs.getString(KEY_LOCATION_CACHE_MAP, null) ?: return emptyMap()
-        return try {
+        val json = prefs.getString(KEY_LOCATION_CACHE_MAP, null)
+        if (json == null) {
+            memoizedRawMapJson = null
+            memoizedLocationMap = emptyMap()
+            return emptyMap()
+        }
+        if (json == memoizedRawMapJson) {
+            return memoizedLocationMap
+        }
+        val parsed = try {
             val type = object : TypeToken<Map<String, CachedWeatherEntry>>() {}.type
             gson.fromJson<Map<String, CachedWeatherEntry>>(json, type) ?: emptyMap()
         } catch (_: Exception) {
             emptyMap()
         }
+        memoizedRawMapJson = json
+        memoizedLocationMap = parsed
+        return parsed
     }
 
     private fun defaultPopularCities(): List<SavedLocation> = listOf(

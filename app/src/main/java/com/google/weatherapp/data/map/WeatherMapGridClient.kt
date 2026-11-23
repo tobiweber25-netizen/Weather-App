@@ -95,14 +95,38 @@ class WeatherMapGridClient(
     }
 
     companion object {
-        const val GRID_ROWS = 7
-        const val GRID_COLS = 7
+        // Shared across map sessions so reopening Weather Map within 15 minutes renders in 0ms
+        val sharedInstance: WeatherMapGridClient by lazy { WeatherMapGridClient() }
+
+        // 5x5 (25 pts) matches smoothstep synoptic accuracy while cutting Open-Meteo latency & quota in half
+        const val GRID_ROWS = 5
+        const val GRID_COLS = 5
         const val FORECAST_HOURS = 48
         private const val CACHE_TTL_MS = 15L * 60L * 1000L
-        private const val MAX_CACHED_REGIONS = 6
+        private const val MAX_CACHED_REGIONS = 8
         private const val OPEN_METEO_FORECAST_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
         private const val HOURLY_VARIABLES =
             "wind_speed_10m,wind_direction_10m,wind_gusts_10m,temperature_2m,precipitation,cloud_cover,pressure_msl,cape,weather_code"
+
+        /**
+         * Estimates the initial regional camera viewport around (latitude, longitude) so weather grid
+         * fetching starts at millisecond 0 in parallel with MapLibre GPU initialization.
+         */
+        fun estimateInitialViewport(
+            latitude: Double,
+            longitude: Double,
+            zoom: Double = 6.0
+        ): MapViewportBounds {
+            val scale = Math.pow(2.0, (6.0 - zoom).coerceIn(-3.0, 3.0))
+            val halfLat = (4.2 * scale).coerceIn(0.6, 18.0)
+            val cosLat = kotlin.math.cos(Math.toRadians(latitude.coerceIn(-75.0, 75.0))).coerceAtLeast(0.35)
+            val halfLon = (3.4 * scale / cosLat).coerceIn(0.6, 22.0)
+            val south = (latitude - halfLat).coerceIn(-82.0, 80.0)
+            val north = (latitude + halfLat).coerceIn(south + 0.8, 82.0)
+            val west = (longitude - halfLon).coerceIn(-179.5, 178.5)
+            val east = (longitude + halfLon).coerceIn(west + 0.8, 179.5)
+            return MapViewportBounds(south = south, west = west, north = north, east = east, zoom = zoom)
+        }
 
         internal fun computePaddedFetchBounds(viewport: MapViewportBounds): MapViewportBounds {
             // Pad by 25% on each side so gentle pans reuse the cached grid seamlessly

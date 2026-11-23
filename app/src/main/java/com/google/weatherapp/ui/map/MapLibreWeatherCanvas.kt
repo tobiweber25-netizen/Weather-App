@@ -2,17 +2,20 @@ package com.google.weatherapp.ui.map
 
 import android.graphics.Bitmap
 import android.graphics.PointF
+import android.util.Log
 import android.widget.FrameLayout
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.google.weatherapp.data.api.ApiClient
 import com.google.weatherapp.data.map.*
 import com.google.weatherapp.theme.MapCanvasFallbackBg
 import com.google.weatherapp.theme.MapIsobarStroke
@@ -26,6 +29,7 @@ import org.maplibre.android.maps.MapLibreMap
 import org.maplibre.android.maps.MapLibreMapOptions
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
+import org.maplibre.android.module.http.HttpRequestUtil
 import org.maplibre.android.style.layers.LineLayer
 import org.maplibre.android.style.layers.Property
 import org.maplibre.android.style.layers.PropertyFactory
@@ -38,7 +42,6 @@ import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
-import androidx.compose.ui.graphics.toArgb
 
 data class ProjectedScreenPoint(
     val xPx: Float,
@@ -54,42 +57,52 @@ data class MapCameraCommand(
 )
 
 /**
- * Native MapLibre OpenGL ES dark-vector map (OpenFreeMap Fiord) fused with:
+ * Native MapLibre OpenGL ES dark-vector map (OpenFreeMap Fiord with inline dark vector fallback) fused with:
  * - Smooth GPU-filtered Open-Meteo ImageSource overlays inserted BELOW borders & city names
  * - Live EUMETSAT Meteosat / NOAA GOES / Visual Crossing RasterSource layers BELOW city names
  * - Native GPU anti-aliased GeoJSON LineLayer for real 4 hPa sea-level pressure isobars
  * - Transparent 60fps hardware-accelerated WindParticleOverlayView above the map
  *
- * Uses TextureView mode (textureMode = true) for zero Compose flicker or z-order artifacts.
+ * Initializes MapView before DisposableEffect so Android lifecycle events (onCreate -> onStart -> onResume)
+ * always run deterministically before style loading, with TextureView mode for zero Compose flicker.
  */
 @Composable
 fun MapLibreWeatherCanvas(
+    initialLatitude: Double,
+    initialLongitude: Double,
     uiState: WeatherMapUiState,
     cameraCommand: MapCameraCommand?,
+    styleReloadToken: Long,
     onViewportIdle: (MapViewportBounds) -> Unit,
     onMapTapped: (latitude: Double, longitude: Double) -> Unit,
     onProjectionChanged: ((LatLng) -> ProjectedScreenPoint?) -> Unit,
+    onBasemapReadyChanged: (Boolean) -> Unit,
+    onBasemapErrorChanged: (String?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Ensure MapLibre native library is initialized lazily on first map launch (idempotent)
+    // Ensure MapLibre native library and shared OkHttp client are initialized once before MapView creation
     remember(context) {
         MapLibre.getInstance(context.applicationContext)
+        HttpRequestUtil.setOkHttpClient(ApiClient.okHttpClient)
     }
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
     var loadedStyle by remember { mutableStateOf<Style?>(null) }
-    var windOverlayView by remember { mutableStateOf<WindParticleOverlayView?>(null) }
-    var mapViewRef by remember { mutableStateOf<MapView?>(null) }
+    var resolvedStyleJson by remember { mutableStateOf<String?>(null) }
+    var usedFallbackStyle by remember { mutableStateOf(false) }
     val activeExternalLayerIds = remember { mutableStateListOf<String>() }
 
     val latestOnViewportIdle by rememberUpdatedState(onViewportIdle)
     val latestOnMapTapped by rememberUpdatedState(onMapTapped)
     val latestOnProjectionChanged by rememberUpdatedState(onProjectionChanged)
+    val latestOnBasemapReadyChanged by rememberUpdatedState(onBasemapReadyChanged)
+    val latestOnBasemapErrorChanged by rememberUpdatedState(onBasemapErrorChanged)
 
     fun publishProjection(map: MapLibreMap, mv: MapView) {
+        if (mv.width <= 0 || mv.height <= 0) return
         latestOnProjectionChanged { latLng ->
             val pt = map.projection.toScreenLocation(latLng)
             val vis = pt.x >= -80f && pt.x <= mv.width + 80f && pt.y >= -80f && pt.y <= mv.height + 80f
@@ -98,6 +111,7 @@ fun MapLibreWeatherCanvas(
     }
 
     fun calibrateWindView(map: MapLibreMap, windView: WindParticleOverlayView) {
+        if (windView.width <= 0 || windView.height <= 0) return
         val cam = map.cameraPosition
         val centerLat = cam.target?.latitude ?: 0.0
         windView.updateProjectionCalibration(
@@ -124,62 +138,155 @@ fun MapLibreWeatherCanvas(
         }
     }
 
-    // Bind Android Lifecycle strictly to MapView without duplicate start/resume/destroy calls
-    DisposableEffect(lifecycleOwner, mapViewRef) {
-        val mv = mapViewRef ?: return@DisposableEffect onDispose {}
+    // Create MapView and WindParticleOverlayView deterministically BEFORE DisposableEffect
+    val mapView = remember(context) {
+        val options = MapLibreMapOptions.createFromAttributes(context, null)
+            .textureMode(true)
+            .foregroundLoadColor(MapCanvasFallbackBg.toArgb())
+            .compassEnabled(false)
+            .logoEnabled(false)
+            .attributionEnabled(false)
+            .camera(
+                CameraPosition.Builder()
+                    .target(LatLng(initialLatitude, initialLongitude))
+                    .zoom(INITIAL_REGIONAL_ZOOM)
+                    .build()
+            )
+        MapView(context, options).apply {
+            onCreate(null)
+        }
+    }
+
+    val windOverlayView = remember(context) {
+        WindParticleOverlayView(context)
+    }
+
+    // Bind Android Lifecycle strictly to MapView on the VERY FIRST composition
+    DisposableEffect(lifecycleOwner, mapView) {
         var isStarted = false
         var isResumed = false
         var isDestroyed = false
+
+        val failListener = MapView.OnDidFailLoadingMapListener { errorMessage ->
+            Log.w(TAG, "MapLibre failed loading map: $errorMessage")
+            if (!usedFallbackStyle) {
+                usedFallbackStyle = true
+                resolvedStyleJson = WeatherTileSourceResolver.FALLBACK_DARK_VECTOR_STYLE_JSON
+            } else {
+                latestOnBasemapReadyChanged(false)
+                latestOnBasemapErrorChanged("Map tiles couldn't load. Check your connection and retry.")
+            }
+        }
+        mapView.addOnDidFailLoadingMapListener(failListener)
 
         val observer = LifecycleEventObserver { _, event ->
             if (isDestroyed) return@LifecycleEventObserver
             when (event) {
                 Lifecycle.Event.ON_START -> if (!isStarted) {
-                    mv.onStart()
+                    mapView.onStart()
                     isStarted = true
                 }
                 Lifecycle.Event.ON_RESUME -> {
                     if (!isStarted) {
-                        mv.onStart()
+                        mapView.onStart()
                         isStarted = true
                     }
                     if (!isResumed) {
-                        mv.onResume()
+                        mapView.onResume()
                         isResumed = true
                     }
                 }
                 Lifecycle.Event.ON_PAUSE -> if (isResumed) {
-                    mv.onPause()
+                    mapView.onPause()
                     isResumed = false
                 }
                 Lifecycle.Event.ON_STOP -> if (isStarted) {
-                    mv.onStop()
+                    mapView.onStop()
                     isStarted = false
                 }
                 Lifecycle.Event.ON_DESTROY -> {
                     if (isResumed) {
-                        mv.onPause()
+                        mapView.onPause()
                         isResumed = false
                     }
                     if (isStarted) {
-                        mv.onStop()
+                        mapView.onStop()
                         isStarted = false
                     }
-                    mv.onDestroy()
+                    mapView.onDestroy()
                     isDestroyed = true
                 }
                 else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
+
+        // Wire MapLibre callbacks once MapView is alive and lifecycle-bound
+        mapView.getMapAsync { map ->
+            mapLibreMap = map
+            map.setMinZoomPreference(2.0)
+            map.setMaxZoomPreference(13.5)
+            map.uiSettings.isTiltGesturesEnabled = false
+            map.uiSettings.isRotateGesturesEnabled = true
+
+            map.addOnCameraMoveStartedListener {
+                windOverlayView.setCameraMoving(true)
+            }
+
+            map.addOnCameraMoveListener {
+                publishProjection(map, mapView)
+            }
+
+            map.addOnCameraIdleListener {
+                publishProjection(map, mapView)
+                calibrateWindView(map, windOverlayView)
+                windOverlayView.setCameraMoving(false)
+                emitCurrentBounds(map)
+            }
+
+            map.addOnMapClickListener { latLng ->
+                latestOnMapTapped(latLng.latitude, latLng.longitude)
+                true
+            }
+        }
+
         onDispose {
+            mapView.removeOnDidFailLoadingMapListener(failListener)
             lifecycleOwner.lifecycle.removeObserver(observer)
             if (!isDestroyed) {
-                if (isResumed) mv.onPause()
-                if (isStarted) mv.onStop()
-                mv.onDestroy()
+                if (isResumed) mapView.onPause()
+                if (isStarted) mapView.onStop()
+                mapView.onDestroy()
                 isDestroyed = true
             }
+        }
+    }
+
+    // Fetch/read cached Fiord style JSON over shared OkHttp in parallel with GPU surface creation
+    LaunchedEffect(styleReloadToken) {
+        latestOnBasemapErrorChanged(null)
+        val (styleJson, isFiord) = WeatherTileSourceResolver.loadFiordOrFallbackStyleJson(
+            forceRefresh = styleReloadToken > 0L
+        )
+        usedFallbackStyle = !isFiord
+        resolvedStyleJson = styleJson
+    }
+
+    // Apply style JSON cleanly once BOTH MapLibreMap and style JSON are ready
+    LaunchedEffect(mapLibreMap, resolvedStyleJson) {
+        val map = mapLibreMap ?: return@LaunchedEffect
+        val json = resolvedStyleJson ?: return@LaunchedEffect
+        loadedStyle = null
+        activeExternalLayerIds.clear()
+        map.setStyle(Style.Builder().fromJson(json)) { style ->
+            // Guarantee foreground cover clears immediately once style is ready
+            mapView.foreground = null
+            loadedStyle = style
+            latestOnBasemapReadyChanged(true)
+            latestOnBasemapErrorChanged(null)
+            publishProjection(map, mapView)
+            calibrateWindView(map, windOverlayView)
+            emitCurrentBounds(map)
         }
     }
 
@@ -193,7 +300,7 @@ fun MapLibreWeatherCanvas(
             .bearing(0.0)
             .tilt(0.0)
             .build()
-        map.animateCamera(CameraUpdateFactory.newCameraPosition(target), 650)
+        map.animateCamera(CameraUpdateFactory.newCameraPosition(target), 600)
     }
 
     // Sync smooth Open-Meteo color-field ImageSource whenever bitmap or layer opacity updates
@@ -241,15 +348,18 @@ fun MapLibreWeatherCanvas(
         uiState.showWindStreamlines,
         uiState.selectedLayer
     ) {
-        val windView = windOverlayView ?: return@LaunchedEffect
         val subtle = uiState.selectedLayer != WeatherMapLayer.WIND
-        windView.updateWeatherState(
+        windOverlayView.updateWeatherState(
             grid = uiState.grid,
             hourIndex = uiState.gridHourIndex,
             windMetricMode = uiState.windMetricMode,
             enabled = uiState.showWindStreamlines,
             subtleMode = subtle
         )
+        val map = mapLibreMap
+        if (map != null && !windOverlayView.isCalibrated && windOverlayView.width > 0) {
+            calibrateWindView(map, windOverlayView)
+        }
     }
 
     Box(
@@ -261,91 +371,38 @@ fun MapLibreWeatherCanvas(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 val container = FrameLayout(ctx)
-                val options = MapLibreMapOptions.createFromAttributes(ctx, null)
-                    .textureMode(true)
-                    .compassEnabled(false)
-                    .logoEnabled(false)
-                    .attributionEnabled(false)
-                    .camera(
-                        CameraPosition.Builder()
-                            .target(LatLng(uiState.cameraCenterLat, uiState.cameraCenterLon))
-                            .zoom(INITIAL_REGIONAL_ZOOM)
-                            .build()
-                    )
-
-                val mv = MapView(ctx, options).apply {
-                    onCreate(null)
-                }
-                val windView = WindParticleOverlayView(ctx)
-                windView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                windOverlayView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
                     if (v.width > 0 && v.height > 0) {
                         val map = mapLibreMap
-                        if (map != null && !windView.isCalibrated) {
-                            publishProjection(map, mv)
-                            calibrateWindView(map, windView)
+                        if (map != null && !windOverlayView.isCalibrated) {
+                            publishProjection(map, mapView)
+                            calibrateWindView(map, windOverlayView)
                         }
                     }
                 }
-
+                (mapView.parent as? android.view.ViewGroup)?.removeView(mapView)
+                (windOverlayView.parent as? android.view.ViewGroup)?.removeView(windOverlayView)
                 container.addView(
-                    mv,
+                    mapView,
                     FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT
                     )
                 )
                 container.addView(
-                    windView,
+                    windOverlayView,
                     FrameLayout.LayoutParams(
                         FrameLayout.LayoutParams.MATCH_PARENT,
                         FrameLayout.LayoutParams.MATCH_PARENT
                     )
                 )
-
-                mapViewRef = mv
-                windOverlayView = windView
-
-                mv.getMapAsync { map ->
-                    mapLibreMap = map
-                    map.setMinZoomPreference(2.0)
-                    map.setMaxZoomPreference(13.5)
-                    map.uiSettings.isTiltGesturesEnabled = false
-                    map.uiSettings.isRotateGesturesEnabled = true
-
-                    map.setStyle(Style.Builder().fromUri(WeatherTileSourceResolver.OPENFREEMAP_FIORD_STYLE_URL)) { style ->
-                        loadedStyle = style
-                        publishProjection(map, mv)
-                        calibrateWindView(map, windView)
-                        emitCurrentBounds(map)
-                    }
-
-                    map.addOnCameraMoveStartedListener {
-                        windView.setCameraMoving(true)
-                    }
-
-                    map.addOnCameraMoveListener {
-                        publishProjection(map, mv)
-                    }
-
-                    map.addOnCameraIdleListener {
-                        publishProjection(map, mv)
-                        calibrateWindView(map, windView)
-                        windView.setCameraMoving(false)
-                        emitCurrentBounds(map)
-                    }
-
-                    map.addOnMapClickListener { latLng ->
-                        latestOnMapTapped(latLng.latitude, latLng.longitude)
-                        true
-                    }
-                }
-
                 container
             }
         )
     }
 }
 
+private const val TAG = "MapLibreWeatherCanvas"
 private const val INITIAL_REGIONAL_ZOOM = 6.0
 private const val SMOOTH_FIELD_SOURCE_ID = "almanac-smooth-field-source"
 private const val SMOOTH_FIELD_LAYER_ID = "almanac-smooth-field-layer"

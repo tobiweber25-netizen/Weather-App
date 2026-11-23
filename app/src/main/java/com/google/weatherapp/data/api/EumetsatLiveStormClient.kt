@@ -31,9 +31,9 @@ class EumetsatLiveStormClient(
     baseClient: OkHttpClient = ApiClient.okHttpClient
 ) {
     private val httpClient: OkHttpClient = baseClient.newBuilder()
-        .connectTimeout(4, TimeUnit.SECONDS)
-        .readTimeout(4, TimeUnit.SECONDS)
-        .callTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(2500, TimeUnit.MILLISECONDS)
+        .readTimeout(2500, TimeUnit.MILLISECONDS)
+        .callTimeout(3000, TimeUnit.MILLISECONDS)
         .build()
 
     suspend fun fetchLiveObservation(
@@ -42,7 +42,16 @@ class EumetsatLiveStormClient(
     ): LiveSatelliteStormObservation? = withContext(Dispatchers.IO) {
         if (!isWithinEumetsatCoverage(latitude, longitude)) return@withContext null
 
-        coroutineScope {
+        val cacheKey = String.format(Locale.US, "%.1f,%.1f", latitude, longitude)
+        val nowMs = System.currentTimeMillis()
+        synchronized(CACHE_LOCK) {
+            val cached = spatialCache[cacheKey]
+            if (cached != null && (nowMs - cached.fetchedAtMs) in 0..OBSERVATION_CACHE_TTL_MS) {
+                return@withContext cached.observation
+            }
+        }
+
+        val fresh = coroutineScope {
             val lightningDeferred = async { fetchLightningProximity(latitude, longitude) }
             val rdtDeferred = async { fetchDevelopingStormCell(latitude, longitude) }
             val rainDeferred = async { fetchObservedRainRate(latitude, longitude) }
@@ -69,6 +78,14 @@ class EumetsatLiveStormClient(
                 sourceLabel = "Meteosat Live"
             )
         }
+
+        if (fresh != null) {
+            synchronized(CACHE_LOCK) {
+                if (spatialCache.size > 24) spatialCache.clear()
+                spatialCache[cacheKey] = CachedObservation(nowMs, fresh)
+            }
+        }
+        fresh
     }
 
     private fun fetchLightningProximity(latitude: Double, longitude: Double): LightningProbeResult? {
@@ -150,6 +167,11 @@ class EumetsatLiveStormClient(
         val timeIso: String?
     )
 
+    private data class CachedObservation(
+        val fetchedAtMs: Long,
+        val observation: LiveSatelliteStormObservation
+    )
+
     companion object {
         const val EUMETSAT_WMS_BASE = "https://view.eumetsat.int/geoserver/wms"
         private const val EARTH_RADIUS_METERS = 6378137.0
@@ -157,6 +179,9 @@ class EumetsatLiveStormClient(
         private const val LIGHTNING_SCAN_RADIUS_KM = 40.0
         private const val RDT_QUERY_RADIUS_KM = 60.0
         private const val RAIN_QUERY_RADIUS_KM = 15.0
+        private const val OBSERVATION_CACHE_TTL_MS = 5L * 60L * 1000L
+        private val CACHE_LOCK = Any()
+        private val spatialCache = HashMap<String, CachedObservation>()
 
         /**
          * Valid reliable disk for EUMETSAT MTG-I (0 deg geostationary slot):

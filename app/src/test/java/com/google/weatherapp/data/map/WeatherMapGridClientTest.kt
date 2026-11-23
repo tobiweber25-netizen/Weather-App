@@ -77,4 +77,15 @@ class WeatherMapGridClientTest {
         val zoomedIn = MapViewportBounds(-34.0, 18.3, -33.6, 18.7, zoom = 8.5)
         assertFalse(padded.coversViewport(zoomedIn))
     }
+
+    @Test
+    fun estimateInitialViewport_centersOnCityAndUsesFastFiveByFiveGrid() {
+        assertEquals(5, WeatherMapGridClient.GRID_ROWS)
+        assertEquals(5, WeatherMapGridClient.GRID_COLS)
+        val bounds = WeatherMapGridClient.estimateInitialViewport(-33.9249, 18.4241)
+        assertTrue(bounds.north > bounds.south)
+        assertTrue(bounds.east > bounds.west)
+        assertEquals(-33.9249, bounds.centerLat, 0.05)
+        assertEquals(18.4241, bounds.centerLon, 0.05)
+    }
 }

@@ -10,6 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 class WeatherRepository(
     private val apiService: GoogleWeatherApiService = ApiClient.weatherService,
@@ -192,7 +193,8 @@ class WeatherRepository(
         fallbackTimezone: String? = null,
         targetLocation: SavedLocation? = localDataSource?.getSelectedCustomLocation(),
         updateActiveCacheSlot: Boolean = true,
-        shouldUpdateActiveCacheSlot: () -> Boolean = { updateActiveCacheSlot }
+        shouldUpdateActiveCacheSlot: () -> Boolean = { updateActiveCacheSlot },
+        includeSecondaryFeeds: Boolean = true
     ): WeatherDashboardData = withContext(Dispatchers.IO) {
         try {
             coroutineScope {
@@ -238,11 +240,14 @@ class WeatherRepository(
                     }
                 }
                 val sawsAlertsDeferred = async {
-                    safeCall("SAWS CAP alerts") {
-                        sawsAlertClient.fetchAlertsForLocation(
-                            latitude = latitude,
-                            longitude = longitude
-                        )
+                    if (!includeSecondaryFeeds) return@async emptyList()
+                    withTimeoutOrNull(3500L) {
+                        safeCall("SAWS CAP alerts") {
+                            sawsAlertClient.fetchAlertsForLocation(
+                                latitude = latitude,
+                                longitude = longitude
+                            )
+                        }
                     } ?: emptyList()
                 }
                 val regionalModels = resolveBestRegionalModels(latitude, longitude)
@@ -286,20 +291,26 @@ class WeatherRepository(
                 }
                 val preliminaryZone = WeatherMapper.parseZoneIdOrNull(fallbackTimezone)
                 val globalOfficialAlertsDeferred = async {
-                    safeCall("Global official alerts") {
-                        globalOfficialAlertClient.fetchAlertsForLocation(
-                            latitude = latitude,
-                            longitude = longitude,
-                            zoneId = preliminaryZone
-                        )
+                    if (!includeSecondaryFeeds) return@async emptyList()
+                    withTimeoutOrNull(3500L) {
+                        safeCall("Global official alerts") {
+                            globalOfficialAlertClient.fetchAlertsForLocation(
+                                latitude = latitude,
+                                longitude = longitude,
+                                zoneId = preliminaryZone
+                            )
+                        }
                     } ?: emptyList()
                 }
                 val liveSatelliteDeferred = async {
-                    safeCall("EUMETSAT live satellite storm check") {
-                        eumetsatLiveStormClient.fetchLiveObservation(
-                            latitude = latitude,
-                            longitude = longitude
-                        )
+                    if (!includeSecondaryFeeds) return@async null
+                    withTimeoutOrNull(2200L) {
+                        safeCall("EUMETSAT live satellite storm check") {
+                            eumetsatLiveStormClient.fetchLiveObservation(
+                                latitude = latitude,
+                                longitude = longitude
+                            )
+                        }
                     }
                 }
 

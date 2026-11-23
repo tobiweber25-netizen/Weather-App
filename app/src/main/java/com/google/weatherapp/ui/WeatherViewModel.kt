@@ -78,6 +78,8 @@ class WeatherViewModel @JvmOverloads constructor(
     private val pageJobs = mutableMapOf<String, Job>()
     private val pageFetchTimestamps = mutableMapOf<String, Long>()
     private var searchJob: Job? = null
+    private var prefetchJob: Job? = null
+    private var widgetUpdateJob: Job? = null
     @Volatile
     private var hasHydratedCache = false
 
@@ -353,27 +355,52 @@ class WeatherViewModel @JvmOverloads constructor(
     /**
      * Silently warms immediate neighbor pages (centerIndex ± 1) so horizontal swiping
      * lands on real weather data instead of skeleton placeholders, without triggering
-     * pull-to-refresh spinners or overwriting the active widget cache slot.
+     * pull-to-refresh spinners, blocking the active city load, or overwriting the active widget cache slot.
      */
     fun prefetchAdjacentPages(centerIndex: Int) {
         if (!hasHydratedCache) return
-        val saved = _savedLocations.value
-        val maxPageIndex = saved.size
-        listOf(centerIndex - 1, centerIndex + 1).forEach { neighborIdx ->
-            if (neighborIdx !in 0..maxPageIndex) return@forEach
-            val neighborLoc = locationForPage(neighborIdx, saved)
-            val key = pageKeyFor(neighborLoc)
-            if (_pageStates.value[key] is WeatherUiState.Success) return@forEach
-            if (pageJobs[key]?.isActive == true) return@forEach
-            if (neighborLoc == null && !hasLocationPermission() && locationClient.getCachedCoordinates() == null) {
-                return@forEach
+        prefetchJob?.cancel()
+        val runPrefetch = {
+            val saved = _savedLocations.value
+            val maxPageIndex = saved.size
+            listOf(centerIndex - 1, centerIndex + 1).forEach { neighborIdx ->
+                if (neighborIdx !in 0..maxPageIndex) return@forEach
+                val neighborLoc = locationForPage(neighborIdx, saved)
+                val key = pageKeyFor(neighborLoc)
+                if (_pageStates.value[key] is WeatherUiState.Success) return@forEach
+                if (pageJobs[key]?.isActive == true) return@forEach
+                if (neighborLoc == null && !hasLocationPermission() && locationClient.getCachedCoordinates() == null) {
+                    return@forEach
+                }
+                fetchPageWeather(
+                    location = neighborLoc,
+                    showInitialLoading = false,
+                    forceFreshLocation = false,
+                    isPrefetch = true
+                )
             }
-            fetchPageWeather(
-                location = neighborLoc,
-                showInitialLoading = false,
-                forceFreshLocation = false,
-                isPrefetch = true
-            )
+        }
+        if (!enablePolling) {
+            runPrefetch()
+        } else {
+            prefetchJob = vmScope.launch {
+                delay(PREFETCH_DEBOUNCE_MS)
+                runPrefetch()
+            }
+        }
+    }
+
+    private fun scheduleWidgetUpdate(data: com.google.weatherapp.data.model.WeatherDashboardData) {
+        widgetUpdateJob?.cancel()
+        widgetUpdateJob = vmScope.launch(ioDispatcher) {
+            try {
+                com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
+                    context = getApplication(),
+                    preloadedData = data
+                )
+            } catch (_: Exception) {
+                // Ignore widget IPC exceptions in headless/test environments
+            }
         }
     }
 
@@ -396,10 +423,7 @@ class WeatherViewModel @JvmOverloads constructor(
                     shouldUpdate = { pageKeyFor(_selectedCustomLocation.value) == key }
                 )
             }
-            com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
-                context = getApplication(),
-                preloadedData = existingState.data
-            )
+            scheduleWidgetUpdate(existingState.data)
 
             // Refresh silently if older than 5 minutes so swiping back and forth doesn't hammer APIs
             val lastFetch = pageFetchTimestamps[key] ?: 0L
@@ -464,10 +488,7 @@ class WeatherViewModel @JvmOverloads constructor(
                                     shouldUpdate = isActivePage
                                 )
                             }
-                            com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
-                                context = getApplication(),
-                                preloadedData = diskCached
-                            )
+                            scheduleWidgetUpdate(diskCached)
                         }
                         if (isPrefetch) return@launch
                     }
@@ -495,7 +516,8 @@ class WeatherViewModel @JvmOverloads constructor(
                         resolvedLocationName = location.name,
                         fallbackTimezone = location.timezone,
                         targetLocation = location,
-                        shouldUpdateActiveCacheSlot = isActivePage
+                        shouldUpdateActiveCacheSlot = isActivePage,
+                        includeSecondaryFeeds = !isPrefetch
                     )
                 } else {
                     val coords = locationClient.fetchLocation(forceFresh = forceFreshLocation)
@@ -506,7 +528,8 @@ class WeatherViewModel @JvmOverloads constructor(
                         resolvedLocationName = coords.locationName,
                         altitude = coords.altitude,
                         targetLocation = null,
-                        shouldUpdateActiveCacheSlot = isActivePage
+                        shouldUpdateActiveCacheSlot = isActivePage,
+                        includeSecondaryFeeds = !isPrefetch
                     )
                 }
 
@@ -534,10 +557,7 @@ class WeatherViewModel @JvmOverloads constructor(
 
                 if (isActivePage()) {
                     _uiState.value = successState
-                    com.google.weatherapp.widget.WeatherWidgetUpdater.updateAllWidgets(
-                        context = getApplication(),
-                        preloadedData = data
-                    )
+                    scheduleWidgetUpdate(data)
                 }
                 if (location == null || location.isCurrentGps) {
                     com.google.weatherapp.notification.WeatherNotificationScheduler.checkAndDispatchEventAlerts(
@@ -584,6 +604,7 @@ class WeatherViewModel @JvmOverloads constructor(
     companion object {
         const val PAGE_KEY_GPS = "gps"
         private const val SWIPE_REFRESH_THROTTLE_MS = 5 * 60 * 1000L
+        private const val PREFETCH_DEBOUNCE_MS = 850L
 
         fun pageKeyFor(location: SavedLocation?): String {
             if (location == null || location.isCurrentGps) return PAGE_KEY_GPS

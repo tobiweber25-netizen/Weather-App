@@ -22,8 +22,8 @@ android {
         applicationId = "com.google.weatherapp"
         minSdk = 26
         targetSdk = 35
-        versionCode = 13
-        versionName = "1.0.12"
+        versionCode = 14
+        versionName = "1.0.13"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -141,5 +141,5 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     // Native MapLibre OpenGL ES vector map engine (keyless OpenFreeMap Fiord + EUMETSAT/Open-Meteo weather layers)
-    implementation("org.maplibre.gl:android-sdk-opengl:13.0.2")
+    implementation("org.maplibre.gl:android-sdk-opengl:13.7.1")
 }

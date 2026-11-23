@@ -47,17 +47,26 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
+ * Immutable snapshot captured once when launching WeatherMapScreen so background
+ * dashboard refreshes never reset or stall the active map session.
+ */
+data class WeatherMapLaunchConfig(
+    val latitude: Double,
+    val longitude: Double,
+    val placeName: String,
+    val timezone: String?,
+    val initialLayer: WeatherMapLayer = WeatherMapLayer.WIND,
+    val sessionId: Long = System.nanoTime()
+)
+
+/**
  * Full-screen Windy-inspired Weather Map styled natively in Almanac's Luminous Glass theme.
  * Opened from the top-right Options dropdown or contextual expanded-card shortcuts.
  * Displays 100% real data (OpenFreeMap Fiord + EUMETSAT MTG space satellite + Open-Meteo + Visual Crossing).
  */
 @Composable
 fun WeatherMapScreen(
-    initialLatitude: Double,
-    initialLongitude: Double,
-    initialPlaceName: String,
-    initialTimezone: String?,
-    initialLayer: WeatherMapLayer = WeatherMapLayer.WIND,
+    launchConfig: WeatherMapLaunchConfig,
     gpsLocation: SavedLocation?,
     savedLocations: List<SavedLocation>,
     activeAlert: SevereAlertInfo?,
@@ -66,11 +75,17 @@ fun WeatherMapScreen(
 ) {
     BackHandler(onBack = onBack)
 
+    val initialLatitude = launchConfig.latitude
+    val initialLongitude = launchConfig.longitude
+    val initialPlaceName = launchConfig.placeName
+    val initialTimezone = launchConfig.timezone
+    val initialLayer = launchConfig.initialLayer
+
     val coroutineScope = rememberCoroutineScope()
-    val initialZone = remember(initialTimezone) {
+    val initialZone = remember(launchConfig.sessionId) {
         WeatherMapper.parseZoneIdOrNull(initialTimezone) ?: ZoneId.systemDefault()
     }
-    val controller = remember(initialLatitude, initialLongitude, initialLayer) {
+    val controller = remember(launchConfig.sessionId) {
         WeatherMapStateHolder(
             scope = coroutineScope,
             initialLayer = initialLayer,
@@ -85,11 +100,14 @@ fun WeatherMapScreen(
     }
 
     val uiState by controller.uiState.collectAsStateWithLifecycle()
-    var cameraCommand by remember { mutableStateOf<MapCameraCommand?>(null) }
+    var cameraCommand by remember(launchConfig.sessionId) { mutableStateOf<MapCameraCommand?>(null) }
     var showCityJumpMenu by remember { mutableStateOf(false) }
-    var projector by remember { mutableStateOf<((LatLng) -> ProjectedScreenPoint?)?>(null) }
-    var focusedAnchorLat by remember(initialLatitude) { mutableDoubleStateOf(initialLatitude) }
-    var focusedAnchorLon by remember(initialLongitude) { mutableDoubleStateOf(initialLongitude) }
+    var projector by remember(launchConfig.sessionId) { mutableStateOf<((LatLng) -> ProjectedScreenPoint?)?>(null) }
+    var focusedAnchorLat by remember(launchConfig.sessionId) { mutableDoubleStateOf(initialLatitude) }
+    var focusedAnchorLon by remember(launchConfig.sessionId) { mutableDoubleStateOf(initialLongitude) }
+    var isBasemapReady by remember(launchConfig.sessionId) { mutableStateOf(false) }
+    var basemapError by remember(launchConfig.sessionId) { mutableStateOf<String?>(null) }
+    var styleReloadToken by remember(launchConfig.sessionId) { mutableLongStateOf(0L) }
 
     val density = LocalDensity.current
 
@@ -100,11 +118,16 @@ fun WeatherMapScreen(
     ) {
         // 1. Full-bleed native GPU Fiord vector map + weather overlays + 60fps wind particles
         MapLibreWeatherCanvas(
+            initialLatitude = initialLatitude,
+            initialLongitude = initialLongitude,
             uiState = uiState,
             cameraCommand = cameraCommand,
+            styleReloadToken = styleReloadToken,
             onViewportIdle = { bounds -> controller.onViewportIdle(bounds) },
             onMapTapped = { lat, lon -> controller.onMapTapped(lat, lon) },
             onProjectionChanged = { proj -> projector = proj },
+            onBasemapReadyChanged = { ready -> isBasemapReady = ready },
+            onBasemapErrorChanged = { err -> basemapError = err },
             modifier = Modifier.fillMaxSize()
         )
 
@@ -248,7 +271,7 @@ fun WeatherMapScreen(
                             }
                         }
 
-                        if (uiState.gridStatus is WeatherMapGridStatus.Loading) {
+                        if (!isBasemapReady || uiState.gridStatus is WeatherMapGridStatus.Loading) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(IconSizeTokens.Small),
                                 strokeWidth = BorderTokens.Thick,
@@ -422,10 +445,11 @@ fun WeatherMapScreen(
                 }
             }
 
-            // Honest Error / Rate-Limit Banner (never hides failures behind fake numbers)
+            // Honest Error / Rate-Limit Banner (basemap OR weather grid — never hides failures)
             val errStatus = uiState.gridStatus as? WeatherMapGridStatus.Error
-            AnimatedVisibility(visible = errStatus != null, enter = fadeIn(), exit = fadeOut()) {
-                if (errStatus != null) {
+            val bannerMessage = basemapError ?: errStatus?.message
+            AnimatedVisibility(visible = bannerMessage != null, enter = fadeIn(), exit = fadeOut()) {
+                if (bannerMessage != null) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -440,7 +464,7 @@ fun WeatherMapScreen(
                             .padding(horizontal = SpacingTokens.Medium, vertical = SpacingTokens.Small)
                     ) {
                         Text(
-                            text = errStatus.message,
+                            text = bannerMessage,
                             style = MaterialTheme.typography.labelMedium,
                             color = SkyTextPrimary,
                             modifier = Modifier.weight(1f)
@@ -453,7 +477,12 @@ fun WeatherMapScreen(
                             color = SunCoreGold,
                             modifier = Modifier
                                 .clip(RoundedCornerShape(CornerTokens.Pill))
-                                .clickable { controller.retryFetch() }
+                                .clickable {
+                                    if (basemapError != null || !isBasemapReady) {
+                                        styleReloadToken += 1L
+                                    }
+                                    controller.retryFetch()
+                                }
                                 .padding(horizontal = SpacingTokens.Small, vertical = SpacingTokens.ExtraSmall)
                         )
                     }

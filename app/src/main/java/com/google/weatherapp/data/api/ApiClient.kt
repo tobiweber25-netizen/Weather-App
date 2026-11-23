@@ -1,5 +1,6 @@
 package com.google.weatherapp.data.api
 
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Retrofit
@@ -18,6 +19,12 @@ object ApiClient {
     }
 
     internal val okHttpClient = OkHttpClient.Builder().apply {
+        dispatcher(
+            Dispatcher().apply {
+                maxRequests = 64
+                maxRequestsPerHost = 16
+            }
+        )
         addInterceptor { chain ->
             val request = chain.request().newBuilder()
                 .header("User-Agent", "AlmanacWeatherApp/1.0 (Android)")
@@ -28,8 +35,8 @@ object ApiClient {
             addInterceptor(loggingInterceptor)
         }
     }
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
         .build()
 
     val weatherService: GoogleWeatherApiService by lazy {

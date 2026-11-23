@@ -55,6 +55,7 @@ import com.google.weatherapp.data.model.SkyThemeType
 import com.google.weatherapp.data.model.WeatherEffectType
 import com.google.weatherapp.theme.*
 import com.google.weatherapp.ui.components.*
+import com.google.weatherapp.ui.map.WeatherMapLaunchConfig
 import com.google.weatherapp.ui.map.WeatherMapScreen
 import com.google.weatherapp.update.AppUpdateManager
 import com.google.weatherapp.update.UpdateCheckState
@@ -101,7 +102,7 @@ fun WeatherScreen(
     var showLocationPicker by remember { mutableStateOf(false) }
     var showNotificationSheet by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
-    var activeWeatherMapLayer by remember { mutableStateOf<WeatherMapLayer?>(null) }
+    var activeWeatherMapLaunch by remember { mutableStateOf<WeatherMapLaunchConfig?>(null) }
 
     val coroutineScope = rememberCoroutineScope()
     val latestPages by rememberUpdatedState(pages)
@@ -308,6 +309,42 @@ fun WeatherScreen(
         )
     }
 
+    fun openWeatherMap(layer: WeatherMapLayer) {
+        val activeSuccessData = (visibleUiState as? WeatherUiState.Success)?.data
+        val gpsSuccessData = (pageStates[WeatherViewModel.PAGE_KEY_GPS] as? WeatherUiState.Success)?.data
+        val resolvedLat = activeSuccessData?.latitude
+            ?: visiblePageLocation?.latitude
+            ?: gpsSuccessData?.latitude
+            ?: savedLocations.firstOrNull()?.latitude
+        val resolvedLon = activeSuccessData?.longitude
+            ?: visiblePageLocation?.longitude
+            ?: gpsSuccessData?.longitude
+            ?: savedLocations.firstOrNull()?.longitude
+
+        if (resolvedLat != null && resolvedLon != null) {
+            val resolvedName = activeSuccessData?.hero?.locationName
+                ?: visiblePageLocation?.name
+                ?: gpsSuccessData?.hero?.locationName
+                ?: savedLocations.firstOrNull()?.name
+                ?: "Current Location"
+            val resolvedTz = activeSuccessData?.timezone ?: visiblePageLocation?.timezone
+            activeWeatherMapLaunch = WeatherMapLaunchConfig(
+                latitude = resolvedLat,
+                longitude = resolvedLon,
+                placeName = resolvedName,
+                timezone = resolvedTz,
+                initialLayer = layer,
+                sessionId = System.nanoTime()
+            )
+        } else {
+            Toast.makeText(
+                context,
+                "Waiting for location coordinates before opening Weather Map.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
     CompositionLocalProvider(LocalSkyIsBright provides isBrightSky) {
         Box(
             modifier = modifier
@@ -355,6 +392,30 @@ fun WeatherScreen(
                     }
                 }
         ) {
+            val mapLaunch = activeWeatherMapLaunch
+            if (mapLaunch != null) {
+                // Full-screen Weather Map takes 100% of GPU & frame budget (no hidden 60fps sky animations behind it)
+                val activeSuccessData = (visibleUiState as? WeatherUiState.Success)?.data
+                val gpsSuccessData = (pageStates[WeatherViewModel.PAGE_KEY_GPS] as? WeatherUiState.Success)?.data
+                val gpsSavedLocation = if (gpsSuccessData?.latitude != null && gpsSuccessData.longitude != null) {
+                    SavedLocation(
+                        name = gpsSuccessData.hero.locationName,
+                        latitude = gpsSuccessData.latitude,
+                        longitude = gpsSuccessData.longitude,
+                        isCurrentGps = true,
+                        timezone = gpsSuccessData.timezone
+                    )
+                } else null
+
+                WeatherMapScreen(
+                    launchConfig = mapLaunch,
+                    gpsLocation = gpsSavedLocation,
+                    savedLocations = savedLocations,
+                    activeAlert = activeSuccessData?.alert,
+                    onBack = { activeWeatherMapLaunch = null },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
             if (visibleUiState is WeatherUiState.Success) {
                 WeatherEffectOverlay(
                     effectType = resolvedEffect,
@@ -560,7 +621,7 @@ fun WeatherScreen(
                                                 },
                                                 onClick = {
                                                     showMenu = false
-                                                    activeWeatherMapLayer = WeatherMapLayer.WIND
+                                                    openWeatherMap(WeatherMapLayer.WIND)
                                                 }
                                             )
                                             DropdownMenuItem(
@@ -810,7 +871,7 @@ fun WeatherScreen(
                                                     )
                                                     DashboardSection.ALERT -> SevereWeatherAlertPill(
                                                         alert = data.alert,
-                                                        onOpenStormMap = { activeWeatherMapLayer = WeatherMapLayer.STORMS },
+                                                        onOpenStormMap = { openWeatherMap(WeatherMapLayer.STORMS) },
                                                         modifier = widgetModifier
                                                     )
                                                     DashboardSection.HOURLY -> HourlyForecastStrip(
@@ -827,7 +888,7 @@ fun WeatherScreen(
                                                         telemetry = data.telemetry,
                                                         hourlyList = data.hourlyList,
                                                         isDaytime = data.hero.isDaytime,
-                                                        onOpenWeatherMap = { layer -> activeWeatherMapLayer = layer },
+                                                        onOpenWeatherMap = { layer -> openWeatherMap(layer) },
                                                         modifier = widgetModifier
                                                     )
                                                 }
@@ -967,60 +1028,6 @@ fun WeatherScreen(
                     }
                 }
             }
-
-            // Full-screen Windy-inspired Weather Map destination (completely outside HorizontalPager)
-            val mapLayerToOpen = activeWeatherMapLayer
-            if (mapLayerToOpen != null) {
-                val activeSuccessData = (visibleUiState as? WeatherUiState.Success)?.data
-                val gpsSuccessData = (pageStates[WeatherViewModel.PAGE_KEY_GPS] as? WeatherUiState.Success)?.data
-                val resolvedLat = activeSuccessData?.latitude
-                    ?: visiblePageLocation?.latitude
-                    ?: gpsSuccessData?.latitude
-                    ?: savedLocations.firstOrNull()?.latitude
-                val resolvedLon = activeSuccessData?.longitude
-                    ?: visiblePageLocation?.longitude
-                    ?: gpsSuccessData?.longitude
-                    ?: savedLocations.firstOrNull()?.longitude
-
-                if (resolvedLat != null && resolvedLon != null) {
-                    val resolvedName = activeSuccessData?.hero?.locationName
-                        ?: visiblePageLocation?.name
-                        ?: gpsSuccessData?.hero?.locationName
-                        ?: savedLocations.firstOrNull()?.name
-                        ?: "Current Location"
-                    val resolvedTz = activeSuccessData?.timezone ?: visiblePageLocation?.timezone
-                    val gpsSavedLocation = if (gpsSuccessData?.latitude != null && gpsSuccessData.longitude != null) {
-                        SavedLocation(
-                            name = gpsSuccessData.hero.locationName,
-                            latitude = gpsSuccessData.latitude,
-                            longitude = gpsSuccessData.longitude,
-                            isCurrentGps = true,
-                            timezone = gpsSuccessData.timezone
-                        )
-                    } else null
-
-                    WeatherMapScreen(
-                        initialLatitude = resolvedLat,
-                        initialLongitude = resolvedLon,
-                        initialPlaceName = resolvedName,
-                        initialTimezone = resolvedTz,
-                        initialLayer = mapLayerToOpen,
-                        gpsLocation = gpsSavedLocation,
-                        savedLocations = savedLocations,
-                        activeAlert = activeSuccessData?.alert,
-                        onBack = { activeWeatherMapLayer = null },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                } else {
-                    LaunchedEffect(mapLayerToOpen) {
-                        Toast.makeText(
-                            context,
-                            "Waiting for location coordinates before opening Weather Map.",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        activeWeatherMapLayer = null
-                    }
-                }
             }
         }
     }
