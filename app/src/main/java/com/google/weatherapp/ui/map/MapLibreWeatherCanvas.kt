@@ -87,6 +87,7 @@ fun MapLibreWeatherCanvas(
     remember(context) {
         MapLibre.getInstance(context.applicationContext)
         HttpRequestUtil.setOkHttpClient(ApiClient.okHttpClient)
+        true
     }
 
     var mapLibreMap by remember { mutableStateOf<MapLibreMap?>(null) }
@@ -126,14 +127,16 @@ fun MapLibreWeatherCanvas(
 
     fun emitCurrentBounds(map: MapLibreMap) {
         val region = map.projection.visibleRegion.latLngBounds
-        val bounds = MapViewportBounds(
-            south = region.latitudeSouth.coerceIn(-82.0, 82.0),
-            west = region.longitudeWest.coerceIn(-179.9, 179.9),
-            north = region.latitudeNorth.coerceIn(-82.0, 82.0),
-            east = region.longitudeEast.coerceIn(-179.9, 179.9),
-            zoom = map.cameraPosition.zoom
+        val cam = map.cameraPosition
+        val bounds = WeatherMapGridClient.normalizeVisibleViewport(
+            south = region.latitudeSouth,
+            west = region.longitudeWest,
+            north = region.latitudeNorth,
+            east = region.longitudeEast,
+            centerLon = cam.target?.longitude ?: 0.0,
+            zoom = cam.zoom
         )
-        if (bounds.north > bounds.south && bounds.east > bounds.west) {
+        if (bounds != null) {
             latestOnViewportIdle(bounds)
         }
     }
@@ -316,7 +319,8 @@ fun MapLibreWeatherCanvas(
             style = style,
             bitmap = if (uiState.tilePlan.useSmoothOpenMeteoField) uiState.smoothFieldBitmap else null,
             bounds = uiState.smoothFieldBounds,
-            opacity = uiState.tilePlan.openMeteoOverlayOpacity
+            opacity = uiState.tilePlan.openMeteoOverlayOpacity,
+            activeExternalLayerIds = activeExternalLayerIds
         )
     }
 
@@ -339,10 +343,10 @@ fun MapLibreWeatherCanvas(
         )
     }
 
-    // Sync 60fps WindParticleOverlayView state
+    // Sync frame-rate-independent WindParticleOverlayView state
     LaunchedEffect(
         windOverlayView,
-        uiState.grid,
+        uiState.gridComposite,
         uiState.gridHourIndex,
         uiState.windMetricMode,
         uiState.showWindStreamlines,
@@ -350,7 +354,7 @@ fun MapLibreWeatherCanvas(
     ) {
         val subtle = uiState.selectedLayer != WeatherMapLayer.WIND
         windOverlayView.updateWeatherState(
-            grid = uiState.grid,
+            composite = uiState.gridComposite,
             hourIndex = uiState.gridHourIndex,
             windMetricMode = uiState.windMetricMode,
             enabled = uiState.showWindStreamlines,
@@ -371,12 +375,17 @@ fun MapLibreWeatherCanvas(
             modifier = Modifier.fillMaxSize(),
             factory = { ctx ->
                 val container = FrameLayout(ctx)
-                windOverlayView.addOnLayoutChangeListener { v, _, _, _, _, _, _, _, _ ->
+                windOverlayView.addOnLayoutChangeListener { v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
                     if (v.width > 0 && v.height > 0) {
+                        val resized = (right - left) != (oldRight - oldLeft) ||
+                            (bottom - top) != (oldBottom - oldTop)
                         val map = mapLibreMap
-                        if (map != null && !windOverlayView.isCalibrated) {
+                        if (map != null && (resized || !windOverlayView.isCalibrated)) {
                             publishProjection(map, mapView)
                             calibrateWindView(map, windOverlayView)
+                            if (resized) {
+                                emitCurrentBounds(map)
+                            }
                         }
                     }
                 }
@@ -403,7 +412,7 @@ fun MapLibreWeatherCanvas(
 }
 
 private const val TAG = "MapLibreWeatherCanvas"
-private const val INITIAL_REGIONAL_ZOOM = 6.0
+private const val INITIAL_REGIONAL_ZOOM = 6.2
 private const val SMOOTH_FIELD_SOURCE_ID = "almanac-smooth-field-source"
 private const val SMOOTH_FIELD_LAYER_ID = "almanac-smooth-field-layer"
 private const val ISOBAR_SOURCE_ID = "almanac-isobar-source"
@@ -422,7 +431,8 @@ private fun syncSmoothImageLayer(
     style: Style,
     bitmap: Bitmap?,
     bounds: MapViewportBounds?,
-    opacity: Float
+    opacity: Float,
+    activeExternalLayerIds: List<String>
 ) {
     if (!style.isFullyLoaded) return
     val existingLayer = style.getLayerAs<RasterLayer>(SMOOTH_FIELD_LAYER_ID)
@@ -455,7 +465,11 @@ private fun syncSmoothImageLayer(
             PropertyFactory.rasterResampling(Property.RASTER_RESAMPLING_LINEAR),
             PropertyFactory.rasterFadeDuration(120f)
         )
-        val anchor = resolveAnchorLayerId(style)
+        // Always stay underneath active satellite/radar raster layers AND underneath map borders/labels
+        val firstExtLayerId = activeExternalLayerIds
+            .map { "ext-layer-$it" }
+            .firstOrNull { style.getLayer(it) != null }
+        val anchor = firstExtLayerId ?: resolveAnchorLayerId(style)
         if (anchor != null) {
             style.addLayerBelow(layer, anchor)
         } else {
@@ -483,7 +497,7 @@ private fun syncExternalRasterLayers(
     }
 
     val anchor = resolveAnchorLayerId(style)
-    for (spec in desired) {
+    for ((idx, spec) in desired.withIndex()) {
         val layerId = "ext-layer-${spec.id}"
         val sourceId = "ext-src-${spec.id}"
         val existing = style.getLayerAs<RasterLayer>(layerId)
@@ -509,8 +523,13 @@ private fun syncExternalRasterLayers(
             PropertyFactory.rasterResampling(Property.RASTER_RESAMPLING_LINEAR),
             PropertyFactory.rasterFadeDuration(180f)
         )
-        if (anchor != null) {
-            style.addLayerBelow(rasterLayer, anchor)
+        // Preserve bottom-to-top ordering in [desired] even when a lower layer (e.g. radar) arrives after an upper layer (e.g. lightning)
+        val nextExistingLayerId = ((idx + 1) until desired.size)
+            .map { "ext-layer-${desired[it].id}" }
+            .firstOrNull { style.getLayer(it) != null }
+        val insertBelow = nextExistingLayerId ?: anchor
+        if (insertBelow != null) {
+            style.addLayerBelow(rasterLayer, insertBelow)
         } else {
             style.addLayer(rasterLayer)
         }

@@ -1,16 +1,15 @@
 package com.google.weatherapp.ui.map
 
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
+import android.graphics.Path
 import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.View
 import androidx.compose.ui.graphics.toArgb
-import com.google.weatherapp.data.map.WeatherGridField
+import com.google.weatherapp.data.map.WeatherFieldMath
+import com.google.weatherapp.data.map.WeatherGridComposite
 import com.google.weatherapp.data.map.WindMetricMode
 import com.google.weatherapp.theme.MapWindParticleCalm
 import com.google.weatherapp.theme.MapWindParticleGale
@@ -19,61 +18,162 @@ import kotlin.math.cos
 import kotlin.math.floor
 import kotlin.math.hypot
 import kotlin.math.sin
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * Lightweight 60fps hardware-accelerated Windy-style flowing wind streamline overlay.
+ * Pure JVM-safe kinematics for wind streamline particles so velocity curves and frame-rate
+ * independence (60Hz / 90Hz / 120Hz) are verified deterministically in unit tests.
+ */
+object WindParticleMath {
+    const val MIN_FLOW_SPEED_KMH = 0.8f
+    const val MAX_VISUAL_SPEED_DP_PER_SEC = 64f
+    const val MAX_FRAME_DT_SECONDS = 0.05f
+
+    /**
+     * Converts meteorological wind speed (km/h) into a serene, readable Windy-style visual glide
+     * speed in dp/second. Strictly monotonic so stronger winds visibly flow faster without ever
+     * turning into chaotic streaks on high-refresh-rate displays.
+     */
+    fun visualSpeedDpPerSec(speedKmH: Float): Float {
+        if (!speedKmH.isFinite() || speedKmH < MIN_FLOW_SPEED_KMH) return 0f
+        val clamped = speedKmH.coerceAtMost(200f)
+        return (5.5f + 14.5f * sqrt(clamped / 20f) + 0.19f * clamped)
+            .coerceAtMost(MAX_VISUAL_SPEED_DP_PER_SEC)
+    }
+
+    /**
+     * Converts elapsed Choreographer frame nanos into clamped physics delta-seconds so
+     * 60Hz, 90Hz, and 120Hz displays animate at the exact same physical speed.
+     */
+    fun clampDeltaSeconds(elapsedNanos: Long): Float {
+        if (elapsedNanos <= 0L) return 0f
+        return (elapsedNanos / 1_000_000_000.0).toFloat().coerceIn(0.001f, MAX_FRAME_DT_SECONDS)
+    }
+
+    fun stepDistancePx(speedKmH: Float, dtSeconds: Float, density: Float): Float {
+        if (dtSeconds <= 0f || density <= 0f) return 0f
+        return visualSpeedDpPerSec(speedKmH) * dtSeconds * density
+    }
+
+    /**
+     * Smooth C1 fade-in (first 18%) and fade-out (last 24%) envelope over particle lifecycle [0..1].
+     */
+    fun lifeEnvelope(lifeNorm: Float): Float {
+        val n = lifeNorm.coerceIn(0f, 1f)
+        val raw = when {
+            n < 0.18f -> n / 0.18f
+            n > 0.76f -> (1f - n) / 0.24f
+            else -> 1f
+        }.coerceIn(0f, 1f)
+        return raw * raw * (3f - 2f * raw)
+    }
+
+    /**
+     * Unwraps a [warpN]x[warpN] grid of longitudes in-place outward from its center cell so
+     * bilinear interpolation across the ±180° antimeridian stays continuous instead of cutting
+     * across 0° longitude.
+     */
+    fun unwrapLongitudes(lons: DoubleArray, warpN: Int) {
+        if (warpN <= 0 || lons.size < warpN * warpN) return
+        val mid = warpN / 2
+
+        fun unwrapRelative(value: Double, ref: Double): Double {
+            var v = value
+            while (v - ref > 180.0) v -= 360.0
+            while (v - ref < -180.0) v += 360.0
+            return v
+        }
+
+        // Unwrap center row outward from center cell
+        val midRowBase = mid * warpN
+        for (c in (mid + 1) until warpN) {
+            lons[midRowBase + c] = unwrapRelative(lons[midRowBase + c], lons[midRowBase + c - 1])
+        }
+        for (c in (mid - 1) downTo 0) {
+            lons[midRowBase + c] = unwrapRelative(lons[midRowBase + c], lons[midRowBase + c + 1])
+        }
+        // Unwrap each column upward and downward from the center row
+        for (c in 0 until warpN) {
+            for (r in (mid + 1) until warpN) {
+                lons[r * warpN + c] = unwrapRelative(lons[r * warpN + c], lons[(r - 1) * warpN + c])
+            }
+            for (r in (mid - 1) downTo 0) {
+                lons[r * warpN + c] = unwrapRelative(lons[r * warpN + c], lons[(r + 1) * warpN + c])
+            }
+        }
+    }
+
+    /** Wraps an unwrapped longitude back into [-180.0, 180.0]. */
+    fun wrapLongitude(lon: Double): Double {
+        if (!lon.isFinite()) return 0.0
+        var wrapped = ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
+        if (wrapped == -180.0 && lon > 0.0) wrapped = 180.0
+        return wrapped
+    }
+}
+
+/**
+ * Hardware-accelerated, frame-rate-independent (60Hz/90Hz/120Hz) Windy-style wind streamline overlay.
  *
- * Key smoothness guarantees:
+ * Design guarantees:
  * - Zero Compose recompositions (runs purely via Choreographer on its own Android View).
- * - Zero MapLibre JNI calls inside the 60fps loop (uses a cached 5x5 screen-to-latlon warp grid
+ * - Zero MapLibre JNI calls inside the frame loop (uses a cached 9x9 screen-to-latlon warp grid
  *   updated only when the map camera settles).
- * - Uses an offscreen fading-trail Bitmap with DST_IN alpha decay for silky tapered wind wakes.
+ * - Ring-buffer tapered vector streamlines rendered directly at native 1.0x DPI with zero
+ *   offscreen bitmap blur, zero DST_IN ghosting, and zero per-frame heap allocations.
  * - Never intercepts touch events, so MapLibre pan/pinch/rotate/tap stay 100% native.
  */
 class WindParticleOverlayView(context: Context) : View(context), Choreographer.FrameCallback {
 
     private val random = Random(System.nanoTime())
-    private val particleCount = 380
-    private val px = FloatArray(particleCount)
-    private val py = FloatArray(particleCount)
-    private val age = IntArray(particleCount)
-    private val maxAge = IntArray(particleCount)
+    private val maxParticles = 180
+    private val subtleParticleCount = 115
+    private val trailCapacity = 16
+    private val sampleIntervalSec = 0.055f
 
-    private var trailBitmap: Bitmap? = null
-    private var trailCanvas: Canvas? = null
-    private var bufferScale = 0.75f
-    private var bufWidth = 0
-    private var bufHeight = 0
+    private val px = FloatArray(maxParticles)
+    private val py = FloatArray(maxParticles)
+    private val ageSec = FloatArray(maxParticles)
+    private val maxAgeSec = FloatArray(maxParticles)
+    private val sampleAccumSec = FloatArray(maxParticles)
+    private val lastSpeedKmH = FloatArray(maxParticles)
 
-    // Cached 5x5 screen-to-geographic lookup grid (updated on camera settle; zero JNI per frame!)
-    private val warpN = 5
+    // Circular trail history per particle: [particleIndex * trailCapacity + slot]
+    private val trailX = FloatArray(maxParticles * trailCapacity)
+    private val trailY = FloatArray(maxParticles * trailCapacity)
+    private val trailHead = IntArray(maxParticles)
+    private val trailCount = IntArray(maxParticles)
+
+    // Reusable zero-allocation scratch buffers for hot-path drawing and wind sampling
+    private val sampleOut = FloatArray(4)
+    private val orderedX = FloatArray(trailCapacity + 1)
+    private val orderedY = FloatArray(trailCapacity + 1)
+    private val tierPath = Path()
+
+    // Cached 9x9 screen-to-geographic lookup grid (updated on camera settle; zero JNI per frame!)
+    private val warpN = 9
     private val warpLats = DoubleArray(warpN * warpN)
     private val warpLons = DoubleArray(warpN * warpN)
     private var hasWarpCalibration = false
     val isCalibrated: Boolean get() = hasWarpCalibration
     private var mapBearingRad = 0.0
-    private var metersPerPixel = 1500.0
 
-    private var gridField: WeatherGridField? = null
+    private var gridComposite: WeatherGridComposite? = null
+    private var detailHourIndices: IntArray = IntArray(0)
     private var hourIndex: Int = 0
     private var windMetricMode: WindMetricMode = WindMetricMode.SUSTAINED
     private var streamlinesEnabled: Boolean = false
     private var isCameraMoving: Boolean = false
     private var subtleOverlayMode: Boolean = false
     private var isRunning: Boolean = false
-
-    private val fadePaint = Paint().apply {
-        color = 0xDE000000.toInt() // ~0.87 retention per frame for luminous flowing wakes
-        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-    }
+    private var lastFrameNanos: Long = 0L
 
     private val particlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
     }
-
-    private val blitPaint = Paint(Paint.FILTER_BITMAP_FLAG)
 
     private val calmColor = MapWindParticleCalm.toArgb()
     private val strongColor = MapWindParticleStrong.toArgb()
@@ -88,28 +188,32 @@ class WindParticleOverlayView(context: Context) : View(context), Choreographer.F
     override fun onTouchEvent(event: MotionEvent?): Boolean = false
 
     fun updateWeatherState(
-        grid: WeatherGridField?,
+        composite: WeatherGridComposite?,
         hourIndex: Int,
         windMetricMode: WindMetricMode,
         enabled: Boolean,
         subtleMode: Boolean
     ) {
-        val hourOrGridChanged = this.gridField !== grid || this.hourIndex != hourIndex
-        this.gridField = grid
+        val hourChanged = this.hourIndex != hourIndex
+        val gridChanged = this.gridComposite !== composite
+        this.gridComposite = composite
         this.hourIndex = hourIndex
         this.windMetricMode = windMetricMode
         this.streamlinesEnabled = enabled
         this.subtleOverlayMode = subtleMode
-        blitPaint.alpha = if (subtleMode) 176 else 242
+        this.detailHourIndices = if (composite != null) {
+            WeatherFieldMath.resolveDetailHourIndices(composite, hourIndex)
+        } else {
+            IntArray(0)
+        }
 
         if (!enabled) {
-            clearTrailBuffer()
             stopLoop()
+            clearAllTrails()
             invalidate()
             return
         }
-        if (hourOrGridChanged) {
-            clearTrailBuffer()
+        if (hourChanged || (gridChanged && composite != null && !hasActiveTrails())) {
             respawnAllParticles()
         }
         maybeStartLoop()
@@ -119,21 +223,23 @@ class WindParticleOverlayView(context: Context) : View(context), Choreographer.F
         if (this.isCameraMoving == moving) return
         this.isCameraMoving = moving
         if (moving) {
-            clearTrailBuffer()
+            lastFrameNanos = 0L
+            clearAllTrails()
             invalidate()
         } else if (streamlinesEnabled && hasWarpCalibration) {
+            lastFrameNanos = 0L
             respawnAllParticles()
             maybeStartLoop()
         }
     }
 
     /**
-     * Calibrates the 5x5 screen-to-lat/lon warp grid once after camera settles.
+     * Calibrates the 9x9 screen-to-lat/lon warp grid once after camera settles.
      */
     fun updateProjectionCalibration(
         bearingDegrees: Double,
-        zoom: Double,
-        centerLatitude: Double,
+        @Suppress("UNUSED_PARAMETER") zoom: Double,
+        @Suppress("UNUSED_PARAMETER") centerLatitude: Double,
         projectScreenToLatLon: (screenX: Float, screenY: Float) -> Pair<Double, Double>?
     ) {
         if (width <= 0 || height <= 0) return
@@ -152,12 +258,13 @@ class WindParticleOverlayView(context: Context) : View(context), Choreographer.F
             }
             if (!valid) break
         }
+        if (valid) {
+            WindParticleMath.unwrapLongitudes(warpLons, warpN)
+        }
         hasWarpCalibration = valid
         mapBearingRad = Math.toRadians(bearingDegrees)
-        metersPerPixel = (156543.03392 * cos(Math.toRadians(centerLatitude.coerceIn(-80.0, 80.0)))) /
-            Math.pow(2.0, zoom.coerceIn(1.0, 16.0))
         if (valid && streamlinesEnabled && !isCameraMoving) {
-            clearTrailBuffer()
+            lastFrameNanos = 0L
             respawnAllParticles()
             maybeStartLoop()
         }
@@ -165,8 +272,12 @@ class WindParticleOverlayView(context: Context) : View(context), Choreographer.F
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        allocateBuffer(w, h)
-        respawnAllParticles()
+        if (w != oldw || h != oldh) {
+            hasWarpCalibration = false
+        }
+        if (w > 0 && h > 0) {
+            respawnAllParticles()
+        }
     }
 
     override fun onAttachedToWindow() {
@@ -176,32 +287,105 @@ class WindParticleOverlayView(context: Context) : View(context), Choreographer.F
 
     override fun onDetachedFromWindow() {
         stopLoop()
-        releaseBuffer()
         super.onDetachedFromWindow()
     }
 
     override fun doFrame(frameTimeNanos: Long) {
         if (!isRunning) return
-        if (streamlinesEnabled && !isCameraMoving && hasWarpCalibration && gridField != null && trailCanvas != null) {
-            stepAndDrawToBuffer()
-            invalidate()
+        if (streamlinesEnabled && !isCameraMoving && hasWarpCalibration && gridComposite != null && width > 1 && height > 1) {
+            if (lastFrameNanos != 0L) {
+                val dtSec = WindParticleMath.clampDeltaSeconds(frameTimeNanos - lastFrameNanos)
+                if (dtSec > 0f) {
+                    stepParticles(dtSec)
+                    invalidate()
+                }
+            }
+            lastFrameNanos = frameTimeNanos
+        } else {
+            lastFrameNanos = 0L
         }
         Choreographer.getInstance().postFrameCallback(this)
     }
 
     override fun onDraw(canvas: Canvas) {
-        if (!streamlinesEnabled || isCameraMoving) return
-        val bmp = trailBitmap ?: return
-        if (bmp.isRecycled) return
-        canvas.save()
-        canvas.scale(1f / bufferScale, 1f / bufferScale)
-        canvas.drawBitmap(bmp, 0f, 0f, blitPaint)
-        canvas.restore()
+        if (!streamlinesEnabled || isCameraMoving || !hasWarpCalibration || gridComposite == null) return
+        val activeCount = if (subtleOverlayMode) subtleParticleCount else maxParticles
+        val density = resources.displayMetrics.density
+        val minStroke = 1.05f * density
+        val maxStroke = 1.95f * density
+        val modeAlphaScale = if (subtleOverlayMode) 0.62f else 0.94f
+
+        for (i in 0 until activeCount) {
+            val count = trailCount[i]
+            if (count < 1) continue
+            val speed = lastSpeedKmH[i]
+            if (speed < WindParticleMath.MIN_FLOW_SPEED_KMH) continue
+            val curMax = maxAgeSec[i]
+            if (curMax <= 0f) continue
+            val envelope = WindParticleMath.lifeEnvelope(ageSec[i] / curMax)
+            if (envelope <= 0.02f) continue
+
+            // Assemble ordered trail vertices from oldest (0) to current head (totalPts - 1)
+            val baseSlot = i * trailCapacity
+            val oldestIdx = (trailHead[i] - count + 1 + trailCapacity * 2) % trailCapacity
+            var totalPts = 0
+            for (k in 0 until count) {
+                val slot = (oldestIdx + k) % trailCapacity
+                orderedX[totalPts] = trailX[baseSlot + slot]
+                orderedY[totalPts] = trailY[baseSlot + slot]
+                totalPts++
+            }
+            // Append live sub-frame head position for butter-smooth 120Hz motion
+            orderedX[totalPts] = px[i]
+            orderedY[totalPts] = py[i]
+            totalPts++
+
+            // Smoothly retract oldest tail vertex when ring buffer is full so tail glides without snapping
+            if (count == trailCapacity && totalPts >= 3) {
+                val frac = (sampleAccumSec[i] / sampleIntervalSec).coerceIn(0f, 1f)
+                orderedX[0] = orderedX[0] + (orderedX[1] - orderedX[0]) * frac
+                orderedY[0] = orderedY[0] + (orderedY[1] - orderedY[0]) * frac
+            }
+
+            val segCount = totalPts - 1
+            if (segCount <= 0) continue
+
+            val baseColor = when {
+                speed >= 62f -> galeColor
+                speed >= 32f -> strongColor
+                else -> calmColor
+            }
+            val rgb = baseColor and 0x00FFFFFF
+            val baseAlpha = (baseColor ushr 24) * envelope * modeAlphaScale *
+                (0.55f + (speed / 60f).coerceIn(0f, 0.45f))
+            val headStroke = minStroke + ((speed / 75f).coerceIn(0f, 1f) * (maxStroke - minStroke))
+
+            // Draw streamline in 4 tapered continuous Path tiers (zero vertex cap double-blending)
+            for (tier in 0 until 4) {
+                val startSeg = (tier * segCount) / 4
+                val endSeg = ((tier + 1) * segCount) / 4
+                if (endSeg <= startSeg) continue
+
+                val tierAlpha = (baseAlpha * TIER_ALPHA_WEIGHTS[tier]).toInt().coerceIn(0, 255)
+                if (tierAlpha < 6) continue
+
+                tierPath.rewind()
+                tierPath.moveTo(orderedX[startSeg], orderedY[startSeg])
+                for (s in (startSeg + 1)..endSeg) {
+                    tierPath.lineTo(orderedX[s], orderedY[s])
+                }
+                particlePaint.strokeCap = if (tier == 3) Paint.Cap.ROUND else Paint.Cap.BUTT
+                particlePaint.color = (tierAlpha shl 24) or rgb
+                particlePaint.strokeWidth = headStroke * TIER_STROKE_WEIGHTS[tier]
+                canvas.drawPath(tierPath, particlePaint)
+            }
+        }
     }
 
     private fun maybeStartLoop() {
         if (isRunning || !isAttachedToWindow) return
         if (!streamlinesEnabled) return
+        lastFrameNanos = 0L
         isRunning = true
         Choreographer.getInstance().postFrameCallback(this)
     }
@@ -209,93 +393,103 @@ class WindParticleOverlayView(context: Context) : View(context), Choreographer.F
     private fun stopLoop() {
         if (!isRunning) return
         isRunning = false
+        lastFrameNanos = 0L
         Choreographer.getInstance().removeFrameCallback(this)
     }
 
-    private fun allocateBuffer(w: Int, h: Int) {
-        releaseBuffer()
-        if (w <= 0 || h <= 0) return
-        val bw = (w * bufferScale).toInt().coerceAtLeast(1)
-        val bh = (h * bufferScale).toInt().coerceAtLeast(1)
-        bufWidth = bw
-        bufHeight = bh
-        val bmp = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
-        trailBitmap = bmp
-        trailCanvas = Canvas(bmp)
+    private fun hasActiveTrails(): Boolean {
+        for (i in 0 until maxParticles) {
+            if (trailCount[i] > 0) return true
+        }
+        return false
     }
 
-    private fun clearTrailBuffer() {
-        trailCanvas?.drawColor(0, PorterDuff.Mode.CLEAR)
-    }
-
-    private fun releaseBuffer() {
-        trailCanvas = null
-        trailBitmap?.let { if (!it.isRecycled) it.recycle() }
-        trailBitmap = null
-        bufWidth = 0
-        bufHeight = 0
+    private fun clearAllTrails() {
+        for (i in 0 until maxParticles) {
+            trailCount[i] = 0
+            sampleAccumSec[i] = 0f
+        }
     }
 
     private fun respawnAllParticles() {
-        val bw = bufWidth.coerceAtLeast(1).toFloat()
-        val bh = bufHeight.coerceAtLeast(1).toFloat()
-        for (i in 0 until particleCount) {
-            px[i] = random.nextFloat() * bw
-            py[i] = random.nextFloat() * bh
-            val life = 45 + random.nextInt(55)
-            maxAge[i] = life
-            age[i] = random.nextInt(life)
+        val w = width.coerceAtLeast(1).toFloat()
+        val h = height.coerceAtLeast(1).toFloat()
+        for (i in 0 until maxParticles) {
+            val x = random.nextFloat() * w
+            val y = random.nextFloat() * h
+            val life = 3.6f + random.nextFloat() * 2.8f
+            px[i] = x
+            py[i] = y
+            maxAgeSec[i] = life
+            ageSec[i] = random.nextFloat() * life
+            sampleAccumSec[i] = random.nextFloat() * sampleIntervalSec
+            lastSpeedKmH[i] = 0f
+            resetTrailAt(i, x, y)
         }
     }
 
     private fun respawnParticle(i: Int) {
-        px[i] = random.nextFloat() * bufWidth
-        py[i] = random.nextFloat() * bufHeight
-        maxAge[i] = 45 + random.nextInt(55)
-        age[i] = 0
+        val x = random.nextFloat() * width
+        val y = random.nextFloat() * height
+        px[i] = x
+        py[i] = y
+        maxAgeSec[i] = 3.6f + random.nextFloat() * 2.8f
+        ageSec[i] = 0f
+        sampleAccumSec[i] = 0f
+        lastSpeedKmH[i] = 0f
+        resetTrailAt(i, x, y)
     }
 
-    private fun stepAndDrawToBuffer() {
-        val canvas = trailCanvas ?: return
-        val grid = gridField ?: return
-        if (grid.hourCount <= 0 || grid.rows < 2 || grid.cols < 2 || bufWidth <= 1 || bufHeight <= 1) return
+    private fun resetTrailAt(i: Int, x: Float, y: Float) {
+        val baseSlot = i * trailCapacity
+        trailX[baseSlot] = x
+        trailY[baseSlot] = y
+        trailHead[i] = 0
+        trailCount[i] = 1
+    }
 
-        // 1. Fade previous frame's trails smoothly
-        canvas.drawRect(0f, 0f, bufWidth.toFloat(), bufHeight.toFloat(), fadePaint)
+    private fun pushTrailPoint(i: Int, x: Float, y: Float) {
+        val nextHead = (trailHead[i] + 1) % trailCapacity
+        val baseSlot = i * trailCapacity
+        trailX[baseSlot + nextHead] = x
+        trailY[baseSlot + nextHead] = y
+        trailHead[i] = nextHead
+        val curCount = trailCount[i]
+        if (curCount < trailCapacity) {
+            trailCount[i] = curCount + 1
+        }
+    }
 
-        val safeHour = hourIndex.coerceIn(0, grid.hourCount - 1)
-        val hourBase = safeHour * grid.pointCount
-        val latSpan = (grid.northLat - grid.southLat).coerceAtLeast(1e-6)
-        val lonSpan = (grid.eastLon - grid.westLon).coerceAtLeast(1e-6)
+    private fun stepParticles(dtSec: Float) {
+        val composite = gridComposite ?: return
+        val base = composite.baseGrid
+        if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2 || width <= 1 || height <= 1) return
+
+        val safeHour = hourIndex.coerceIn(0, base.hourCount - 1)
+        val activeCount = if (subtleOverlayMode) subtleParticleCount else maxParticles
         val cosBear = cos(mapBearingRad).toFloat()
         val sinBear = sin(mapBearingRad).toFloat()
         val density = resources.displayMetrics.density
-        val minStroke = 1.15f * density * bufferScale
-        val maxStroke = 2.05f * density * bufferScale
-        // Visual velocity step tuned for pleasant Windy-like flow across regional & city zooms
-        val speedPixelScale = 0.082f * density * bufferScale
         val useGusts = windMetricMode == WindMetricMode.GUSTS
-
-        val invBufW = 1f / bufWidth
-        val invBufH = 1f / bufHeight
-        val maxGridC = grid.cols - 2
-        val maxGridR = grid.rows - 2
+        val invW = 1f / width
+        val invH = 1f / height
         val warpSpan = warpN - 1
+        val viewW = width.toFloat()
+        val viewH = height.toFloat()
 
-        for (i in 0 until particleCount) {
-            val curAge = age[i]
-            val curMax = maxAge[i]
-            if (curAge >= curMax) {
+        for (i in 0 until activeCount) {
+            val nextAge = ageSec[i] + dtSec
+            if (nextAge >= maxAgeSec[i]) {
                 respawnParticle(i)
                 continue
             }
 
             val oldX = px[i]
             val oldY = py[i]
-            val sxNorm = (oldX * invBufW).coerceIn(0f, 1f)
-            val syNorm = (oldY * invBufH).coerceIn(0f, 1f)
+            val sxNorm = (oldX * invW).coerceIn(0f, 1f)
+            val syNorm = (oldY * invH).coerceIn(0f, 1f)
 
-            // Fast bilinear lookup inside 5x5 screen->lat/lon warp grid
+            // Fast bilinear lookup inside 9x9 screen->lat/lon warp grid
             val wx = sxNorm * warpSpan
             val wy = syNorm * warpSpan
             val wc0 = floor(wx).toInt().coerceIn(0, warpSpan - 1)
@@ -313,87 +507,62 @@ class WindParticleOverlayView(context: Context) : View(context), Choreographer.F
 
             val lonTop = warpLons[w00] + (warpLons[w10] - warpLons[w00]) * wtx
             val lonBot = warpLons[w01] + (warpLons[w11] - warpLons[w01]) * wtx
-            val lon = lonTop + (lonBot - lonTop) * wty
+            val lon = WindParticleMath.wrapLongitude(lonTop + (lonBot - lonTop) * wty)
 
-            if (lat < grid.southLat || lat > grid.northLat || lon < grid.westLon || lon > grid.eastLon) {
+            if (!WeatherFieldMath.sampleWindInto(composite, safeHour, detailHourIndices, lat, lon, sampleOut)) {
                 respawnParticle(i)
                 continue
             }
 
-            // Fast inline bilinear wind u/v lookup directly in FloatArray
-            val gx = ((lon - grid.westLon) / lonSpan) * (grid.cols - 1)
-            val gy = ((lat - grid.southLat) / latSpan) * (grid.rows - 1)
-            val c0 = floor(gx).toInt().coerceIn(0, maxGridC)
-            val r0 = floor(gy).toInt().coerceIn(0, maxGridR)
-            val tx = (gx - c0).toFloat()
-            val ty = (gy - r0).toFloat()
+            val u = sampleOut[0]
+            val v = sampleOut[1]
+            val vectorMag = hypot(u.toDouble(), v.toDouble()).toFloat()
+            val metricSpeed = if (useGusts) sampleOut[3] else sampleOut[2]
 
-            val idx00 = hourBase + r0 * grid.cols + c0
-            val idx10 = idx00 + 1
-            val idx01 = idx00 + grid.cols
-            val idx11 = idx01 + 1
-
-            val uTop = grid.windU[idx00] + (grid.windU[idx10] - grid.windU[idx00]) * tx
-            val uBot = grid.windU[idx01] + (grid.windU[idx11] - grid.windU[idx01]) * tx
-            var u = uTop + (uBot - uTop) * ty
-
-            val vTop = grid.windV[idx00] + (grid.windV[idx10] - grid.windV[idx00]) * tx
-            val vBot = grid.windV[idx01] + (grid.windV[idx11] - grid.windV[idx01]) * tx
-            var v = vTop + (vBot - vTop) * ty
-
-            var speed = hypot(u.toDouble(), v.toDouble()).toFloat()
-            if (useGusts && speed > 0.5f) {
-                val gTop = grid.windGustsKmH[idx00] + (grid.windGustsKmH[idx10] - grid.windGustsKmH[idx00]) * tx
-                val gBot = grid.windGustsKmH[idx01] + (grid.windGustsKmH[idx11] - grid.windGustsKmH[idx01]) * tx
-                val gust = gTop + (gBot - gTop) * ty
-                val ratio = (gust / speed).coerceIn(1f, 2.2f)
-                u *= ratio
-                v *= ratio
-                speed *= ratio
-            }
-
-            if (speed < 0.6f) {
-                age[i] = curAge + 2
+            if (metricSpeed < WindParticleMath.MIN_FLOW_SPEED_KMH || vectorMag < 0.05f) {
+                lastSpeedKmH[i] = 0f
+                ageSec[i] = nextAge + dtSec
                 continue
             }
+            lastSpeedKmH[i] = metricSpeed
 
-            // Screen-space delta respecting MapLibre clockwise bearing (screen +Y is South, so -v is North)
-            val eastDx = u * speedPixelScale
-            val southDy = -v * speedPixelScale
+            // Direction unit vector from real meteorological (u, v); magnitude from serene Windy speed curve
+            val dirEast = u / vectorMag
+            val dirSouth = -v / vectorMag
+            val distPx = WindParticleMath.stepDistancePx(metricSpeed, dtSec, density)
+
+            val eastDx = dirEast * distPx
+            val southDy = dirSouth * distPx
             val stepX = eastDx * cosBear + southDy * sinBear
             val stepY = -eastDx * sinBear + southDy * cosBear
 
             val newX = oldX + stepX
             val newY = oldY + stepY
+            val offscreenMargin = 36f * density
 
-            if (newX < 0f || newX >= bufWidth || newY < 0f || newY >= bufHeight) {
+            if (newX < -offscreenMargin || newX >= viewW + offscreenMargin ||
+                newY < -offscreenMargin || newY >= viewH + offscreenMargin
+            ) {
                 respawnParticle(i)
                 continue
             }
 
-            // Smooth life-cycle envelope (soft fade-in + gentle fade-out)
-            val lifeNorm = curAge.toFloat() / curMax.toFloat()
-            val envelope = when {
-                lifeNorm < 0.16f -> lifeNorm / 0.16f
-                lifeNorm > 0.80f -> (1f - lifeNorm) / 0.20f
-                else -> 1f
-            }.coerceIn(0f, 1f)
-
-            val baseColor = when {
-                speed >= 62f -> galeColor
-                speed >= 32f -> strongColor
-                else -> calmColor
-            }
-            val speedAlphaBoost = (0.48f + (speed / 55f).coerceIn(0f, 0.52f))
-            val finalAlpha = ((baseColor ushr 24) * envelope * speedAlphaBoost).toInt().coerceIn(18, 255)
-            particlePaint.color = (finalAlpha shl 24) or (baseColor and 0x00FFFFFF)
-            particlePaint.strokeWidth = minStroke + ((speed / 70f).coerceIn(0f, 1f) * (maxStroke - minStroke))
-
-            canvas.drawLine(oldX, oldY, newX, newY, particlePaint)
-
             px[i] = newX
             py[i] = newY
-            age[i] = curAge + 1
+            ageSec[i] = nextAge
+
+            val accum = sampleAccumSec[i] + dtSec
+            if (accum >= sampleIntervalSec) {
+                pushTrailPoint(i, newX, newY)
+                sampleAccumSec[i] = accum - sampleIntervalSec
+            } else {
+                sampleAccumSec[i] = accum
+            }
         }
+    }
+
+    companion object {
+        private val TIER_ALPHA_WEIGHTS = floatArrayOf(0.16f, 0.38f, 0.68f, 1.00f)
+        private val TIER_STROKE_WEIGHTS = floatArrayOf(0.50f, 0.70f, 0.88f, 1.00f)
     }
 }

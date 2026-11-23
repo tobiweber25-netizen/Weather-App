@@ -1,24 +1,46 @@
 package com.google.weatherapp.data.map
 
 import android.graphics.Bitmap
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import com.google.weatherapp.theme.*
 import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.atan
 import kotlin.math.atan2
 import kotlin.math.ceil
 import kotlin.math.cos
+import kotlin.math.exp
 import kotlin.math.floor
 import kotlin.math.hypot
+import kotlin.math.ln
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.tan
 
 /**
- * Pure deterministic meteorological interpolation, color-field rendering,
- * Marching Squares isobar extraction, and High/Low pressure center detection.
+ * Pure deterministic meteorological interpolation, Web-Mercator-exact color-field rendering,
+ * hierarchical multi-grid composite sampling, Marching Squares isobar extraction,
+ * and High/Low pressure center detection.
  * Operates exclusively on real WeatherGridField readings with zero synthetic fallback data.
  */
 object WeatherFieldMath {
+
+    private const val MAX_MERCATOR_LAT = 85.05112878
+
+    /**
+     * Exact spherical Web Mercator Y projection matching MapLibre GL ImageSource texture mapping.
+     */
+    fun latToMercatorY(latitudeDeg: Double): Double {
+        val clamped = latitudeDeg.coerceIn(-MAX_MERCATOR_LAT, MAX_MERCATOR_LAT)
+        return ln(tan(PI * 0.25 + Math.toRadians(clamped) * 0.5))
+    }
+
+    /**
+     * Exact inverse Web Mercator projection from Mercator Y back to geographic latitude (degrees).
+     */
+    fun mercatorYToLat(mercatorY: Double): Double {
+        return Math.toDegrees(2.0 * atan(exp(mercatorY)) - PI * 0.5)
+    }
 
     /**
      * Converts meteorological wind speed (km/h) and "blows FROM" direction (degrees clockwise
@@ -55,25 +77,54 @@ object WeatherFieldMath {
         else -> CapeRiskTier.CALM
     }
 
+    /**
+     * Resolves matching hour indices for every detail grid in [composite] using exact UTC ISO timestamps
+     * so cached detail grids remain time-synchronized with [composite.baseGrid] across hour boundaries.
+     */
+    internal fun resolveDetailHourIndices(composite: WeatherGridComposite, baseHourIndex: Int): IntArray {
+        val details = composite.detailGrids
+        if (details.isEmpty()) return IntArray(0)
+        val base = composite.baseGrid
+        val safeBase = baseHourIndex.coerceIn(0, (base.hourCount - 1).coerceAtLeast(0))
+        val targetTime = base.hourlyTimesUtc.getOrNull(safeBase)
+        return IntArray(details.size) { idx ->
+            val d = details[idx]
+            if (targetTime == null || d.hourCount <= 0) {
+                -1
+            } else {
+                val matched = d.hourlyTimesUtc.indexOf(targetTime)
+                if (matched >= 0) matched else -1
+            }
+        }
+    }
+
     fun sampleWind(
         grid: WeatherGridField,
         hourIndex: Int,
         latitude: Double,
         longitude: Double
+    ): WindVectorSample? = sampleWind(WeatherGridComposite(grid), hourIndex, latitude, longitude)
+
+    fun sampleWind(
+        composite: WeatherGridComposite,
+        hourIndex: Int,
+        latitude: Double,
+        longitude: Double
     ): WindVectorSample? {
-        if (grid.hourCount <= 0 || grid.rows < 2 || grid.cols < 2) return null
-        if (latitude < grid.southLat || latitude > grid.northLat ||
-            longitude < grid.westLon || longitude > grid.eastLon
+        val base = composite.baseGrid
+        if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2) return null
+        if (latitude < base.southLat || latitude > base.northLat ||
+            longitude < base.westLon || longitude > base.eastLon
         ) {
             return null
         }
-        val u = sampleScalarBilinear(grid, grid.windU, hourIndex, latitude, longitude, smooth = false)
-        val v = sampleScalarBilinear(grid, grid.windV, hourIndex, latitude, longitude, smooth = false)
-        val gust = sampleScalarBilinear(grid, grid.windGustsKmH, hourIndex, latitude, longitude, smooth = false)
-        val vectorSpeed = hypot(u.toDouble(), v.toDouble()).toFloat()
-        val scalarSpeed = sampleScalarBilinear(grid, grid.windSpeedKmH, hourIndex, latitude, longitude, smooth = false)
-        // Preserve speed magnitude smoothly when opposing winds meet near a convergence boundary
-        val effectiveSpeed = maxOf(vectorSpeed, scalarSpeed * 0.85f)
+        val detailHours = resolveDetailHourIndices(composite, hourIndex)
+        val out = FloatArray(4)
+        if (!sampleWindInto(composite, hourIndex, detailHours, latitude, longitude, out)) return null
+        val u = out[0]
+        val v = out[1]
+        val effectiveSpeed = out[2]
+        val gust = out[3]
         val fromDeg = downwindUVToFromDegrees(u, v)
         return WindVectorSample(
             uKmH = u,
@@ -85,6 +136,63 @@ object WeatherFieldMath {
         )
     }
 
+    /**
+     * Zero-allocation hot-path wind sampler for the 60/120fps particle animation loop.
+     * Writes [uKmH, vKmH, effectiveSpeedKmH, gustKmH] into [outUVSG] (length >= 4).
+     */
+    internal fun sampleWindInto(
+        composite: WeatherGridComposite,
+        baseHourIndex: Int,
+        detailHours: IntArray,
+        latitude: Double,
+        longitude: Double,
+        outUVSG: FloatArray
+    ): Boolean {
+        val base = composite.baseGrid
+        if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2) return false
+        if (latitude < base.southLat || latitude > base.northLat ||
+            longitude < base.westLon || longitude > base.eastLon
+        ) {
+            return false
+        }
+        var u = sampleScalarBilinear(base, base.windU, baseHourIndex, latitude, longitude, smooth = false)
+        var v = sampleScalarBilinear(base, base.windV, baseHourIndex, latitude, longitude, smooth = false)
+        var scalarSpeed = sampleScalarBilinear(base, base.windSpeedKmH, baseHourIndex, latitude, longitude, smooth = false)
+        var gust = sampleScalarBilinear(base, base.windGustsKmH, baseHourIndex, latitude, longitude, smooth = false)
+
+        val details = composite.detailGrids
+        for (i in details.indices) {
+            val dHour = detailHours.getOrElse(i) { -1 }
+            if (dHour < 0) continue
+            val detail = details[i]
+            val weight = computeDetailBlendWeight(base, detail, latitude, longitude)
+            if (weight <= 0f) continue
+            val du = sampleScalarBilinear(detail, detail.windU, dHour, latitude, longitude, smooth = false)
+            val dv = sampleScalarBilinear(detail, detail.windV, dHour, latitude, longitude, smooth = false)
+            val ds = sampleScalarBilinear(detail, detail.windSpeedKmH, dHour, latitude, longitude, smooth = false)
+            val dg = sampleScalarBilinear(detail, detail.windGustsKmH, dHour, latitude, longitude, smooth = false)
+            if (weight >= 0.999f) {
+                u = du
+                v = dv
+                scalarSpeed = ds
+                gust = dg
+            } else {
+                u += (du - u) * weight
+                v += (dv - v) * weight
+                scalarSpeed += (ds - scalarSpeed) * weight
+                gust += (dg - gust) * weight
+            }
+        }
+
+        val vectorSpeed = hypot(u.toDouble(), v.toDouble()).toFloat()
+        val effectiveSpeed = maxOf(vectorSpeed, scalarSpeed * 0.85f)
+        outUVSG[0] = u
+        outUVSG[1] = v
+        outUVSG[2] = effectiveSpeed
+        outUVSG[3] = maxOf(gust, effectiveSpeed)
+        return true
+    }
+
     fun samplePointReading(
         grid: WeatherGridField,
         hourIndex: Int,
@@ -92,26 +200,49 @@ object WeatherFieldMath {
         longitude: Double,
         timeLabel: String,
         placeLabel: String? = null
+    ): MapPointReading? = samplePointReading(
+        composite = WeatherGridComposite(grid),
+        hourIndex = hourIndex,
+        latitude = latitude,
+        longitude = longitude,
+        timeLabel = timeLabel,
+        placeLabel = placeLabel
+    )
+
+    fun samplePointReading(
+        composite: WeatherGridComposite,
+        hourIndex: Int,
+        latitude: Double,
+        longitude: Double,
+        timeLabel: String,
+        placeLabel: String? = null
     ): MapPointReading? {
-        if (grid.hourCount <= 0 || grid.rows < 2 || grid.cols < 2) return null
-        val clampedLat = latitude.coerceIn(grid.southLat, grid.northLat)
-        val clampedLon = longitude.coerceIn(grid.westLon, grid.eastLon)
-        val wind = sampleWind(grid, hourIndex, clampedLat, clampedLon) ?: return null
-        val temp = sampleScalarBilinear(grid, grid.temperatureC, hourIndex, clampedLat, clampedLon, smooth = true)
-        val precip = sampleScalarBilinear(grid, grid.precipitationMm, hourIndex, clampedLat, clampedLon, smooth = true)
+        val base = composite.baseGrid
+        if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2) return null
+        val clampedLat = latitude.coerceIn(base.southLat, base.northLat)
+        val clampedLon = longitude.coerceIn(base.westLon, base.eastLon)
+        val detailHours = resolveDetailHourIndices(composite, hourIndex)
+
+        val wind = sampleWind(composite, hourIndex, clampedLat, clampedLon) ?: return null
+        val temp = sampleCompositeScalar(composite, hourIndex, detailHours, clampedLat, clampedLon, smooth = true) { it.temperatureC }
+        val precip = sampleCompositeScalar(composite, hourIndex, detailHours, clampedLat, clampedLon, smooth = true) { it.precipitationMm }
             .coerceAtLeast(0f)
-        val clouds = sampleScalarBilinear(grid, grid.cloudCoverPct, hourIndex, clampedLat, clampedLon, smooth = true)
+        val clouds = sampleCompositeScalar(composite, hourIndex, detailHours, clampedLat, clampedLon, smooth = true) { it.cloudCoverPct }
             .roundToInt().coerceIn(0, 100)
-        val pressure = sampleScalarBilinear(grid, grid.pressureHpa, hourIndex, clampedLat, clampedLon, smooth = true)
+        val pressure = sampleCompositeScalar(composite, hourIndex, detailHours, clampedLat, clampedLon, smooth = true) { it.pressureHpa }
             .roundToInt()
-        val cape = sampleScalarBilinear(grid, grid.capeJkg, hourIndex, clampedLat, clampedLon, smooth = true)
+        val cape = sampleCompositeScalar(composite, hourIndex, detailHours, clampedLat, clampedLon, smooth = true) { it.capeJkg }
             .roundToInt().coerceAtLeast(0)
 
-        val nearestRow = (((clampedLat - grid.southLat) / (grid.northLat - grid.southLat).coerceAtLeast(1e-6)) *
-            (grid.rows - 1)).roundToInt().coerceIn(0, grid.rows - 1)
-        val nearestCol = (((clampedLon - grid.westLon) / (grid.eastLon - grid.westLon).coerceAtLeast(1e-6)) *
-            (grid.cols - 1)).roundToInt().coerceIn(0, grid.cols - 1)
-        val wmo = grid.weatherCode[grid.index(hourIndex, nearestRow, nearestCol)]
+        // Pick WMO thunderstorm code from the finest covering grid
+        val wmoGridPair = findFinestCoveringGrid(composite, hourIndex, detailHours, clampedLat, clampedLon)
+        val wmoGrid = wmoGridPair.first
+        val wmoHour = wmoGridPair.second
+        val nearestRow = (((clampedLat - wmoGrid.southLat) / (wmoGrid.northLat - wmoGrid.southLat).coerceAtLeast(1e-6)) *
+            (wmoGrid.rows - 1)).roundToInt().coerceIn(0, wmoGrid.rows - 1)
+        val nearestCol = (((clampedLon - wmoGrid.westLon) / (wmoGrid.eastLon - wmoGrid.westLon).coerceAtLeast(1e-6)) *
+            (wmoGrid.cols - 1)).roundToInt().coerceIn(0, wmoGrid.cols - 1)
+        val wmo = wmoGrid.weatherCode[wmoGrid.index(wmoHour, nearestRow, nearestCol)]
 
         return MapPointReading(
             latitude = latitude,
@@ -130,6 +261,83 @@ object WeatherFieldMath {
             isThunderstormCode = wmo in 95..99,
             timeLabel = timeLabel
         )
+    }
+
+    private fun findFinestCoveringGrid(
+        composite: WeatherGridComposite,
+        baseHourIndex: Int,
+        detailHours: IntArray,
+        latitude: Double,
+        longitude: Double
+    ): Pair<WeatherGridField, Int> {
+        for (i in composite.detailGrids.lastIndex downTo 0) {
+            val dHour = detailHours.getOrElse(i) { -1 }
+            if (dHour < 0) continue
+            val d = composite.detailGrids[i]
+            if (latitude in d.southLat..d.northLat && longitude in d.westLon..d.eastLon) {
+                return d to dHour
+            }
+        }
+        return composite.baseGrid to baseHourIndex
+    }
+
+    /**
+     * Smooth 1-cell feather weight in [0..1] for blending a finer [detail] grid seamlessly
+     * into a wider [base] grid without boundary creases. Interior points (>= 1 detail cell
+     * from any interior boundary) return 1.0 so zoomed-out regions match zoomed-in data 100%.
+     */
+    internal fun computeDetailBlendWeight(
+        base: WeatherGridField,
+        detail: WeatherGridField,
+        latitude: Double,
+        longitude: Double
+    ): Float {
+        if (latitude < detail.southLat || latitude > detail.northLat ||
+            longitude < detail.westLon || longitude > detail.eastLon
+        ) {
+            return 0f
+        }
+        val featherLat = detail.latStepDeg.coerceAtLeast(0.25)
+        val featherLon = detail.lonStepDeg.coerceAtLeast(0.25)
+        var minDistNorm = 1.0
+        if (detail.southLat > base.southLat + 1e-4) {
+            minDistNorm = minOf(minDistNorm, (latitude - detail.southLat) / featherLat)
+        }
+        if (detail.northLat < base.northLat - 1e-4) {
+            minDistNorm = minOf(minDistNorm, (detail.northLat - latitude) / featherLat)
+        }
+        if (detail.westLon > base.westLon + 1e-4) {
+            minDistNorm = minOf(minDistNorm, (longitude - detail.westLon) / featherLon)
+        }
+        if (detail.eastLon < base.eastLon - 1e-4) {
+            minDistNorm = minOf(minDistNorm, (detail.eastLon - longitude) / featherLon)
+        }
+        val t = minDistNorm.toFloat().coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
+    private inline fun sampleCompositeScalar(
+        composite: WeatherGridComposite,
+        baseHourIndex: Int,
+        detailHours: IntArray,
+        latitude: Double,
+        longitude: Double,
+        smooth: Boolean,
+        selector: (WeatherGridField) -> FloatArray
+    ): Float {
+        val base = composite.baseGrid
+        var value = sampleScalarBilinear(base, selector(base), baseHourIndex, latitude, longitude, smooth)
+        val details = composite.detailGrids
+        for (i in details.indices) {
+            val dHour = detailHours.getOrElse(i) { -1 }
+            if (dHour < 0) continue
+            val detail = details[i]
+            val w = computeDetailBlendWeight(base, detail, latitude, longitude)
+            if (w <= 0f) continue
+            val detailVal = sampleScalarBilinear(detail, selector(detail), dHour, latitude, longitude, smooth)
+            value = if (w >= 0.999f) detailVal else value + (detailVal - value) * w
+        }
+        return value
     }
 
     internal fun sampleScalarBilinear(
@@ -179,40 +387,89 @@ object WeatherFieldMath {
     }
 
     /**
-     * Generates a silky smooth ARGB pixel array for MapLibre ImageSource (row 0 = northLat, top of image).
-     * Pure JVM-safe so unit tests can validate color rendering without Android frameworks.
+     * Generates a silky smooth Web-Mercator-exact ARGB pixel array for MapLibre ImageSource
+     * (row 0 = northLat, top of image). Every pixel row is projected via exact inverse Web Mercator
+     * so color fields never drift North/South relative to coastlines when zooming in and out.
      */
     internal fun renderSmoothFieldPixels(
         grid: WeatherGridField,
         layer: WeatherMapLayer,
         hourIndex: Int,
         windMetricMode: WindMetricMode = WindMetricMode.SUSTAINED,
-        width: Int = 144,
-        height: Int = 144
+        width: Int = 192,
+        height: Int = 192,
+        stormFieldMode: StormFieldMode = StormFieldMode.CAPE_ONLY
+    ): IntArray = renderSmoothFieldPixels(
+        composite = WeatherGridComposite(grid),
+        layer = layer,
+        hourIndex = hourIndex,
+        windMetricMode = windMetricMode,
+        width = width,
+        height = height,
+        stormFieldMode = stormFieldMode
+    )
+
+    internal fun renderSmoothFieldPixels(
+        composite: WeatherGridComposite,
+        layer: WeatherMapLayer,
+        hourIndex: Int,
+        windMetricMode: WindMetricMode = WindMetricMode.SUSTAINED,
+        width: Int = 192,
+        height: Int = 192,
+        stormFieldMode: StormFieldMode = StormFieldMode.PRECIPITATION_AND_CAPE
     ): IntArray {
         val pixels = IntArray(width * height)
-        if (grid.hourCount <= 0 || grid.rows < 2 || grid.cols < 2) return pixels
+        val base = composite.baseGrid
+        if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2) return pixels
 
-        val safeHour = hourIndex.coerceIn(0, grid.hourCount - 1)
-        val fieldArray = when (layer) {
-            WeatherMapLayer.WIND -> if (windMetricMode == WindMetricMode.GUSTS) grid.windGustsKmH else grid.windSpeedKmH
-            WeatherMapLayer.STORMS -> grid.capeJkg
-            WeatherMapLayer.SATELLITE -> grid.cloudCoverPct
-            WeatherMapLayer.TEMPERATURE -> grid.temperatureC
-            WeatherMapLayer.PRESSURE -> grid.pressureHpa
+        val safeHour = hourIndex.coerceIn(0, base.hourCount - 1)
+        val detailHours = resolveDetailHourIndices(composite, safeHour)
+        val selector: (WeatherGridField) -> FloatArray = when (layer) {
+            WeatherMapLayer.WIND -> if (windMetricMode == WindMetricMode.GUSTS) {
+                WeatherGridField::windGustsKmH
+            } else {
+                WeatherGridField::windSpeedKmH
+            }
+            WeatherMapLayer.STORMS -> if (stormFieldMode == StormFieldMode.CAPE_ONLY) {
+                WeatherGridField::capeJkg
+            } else {
+                WeatherGridField::precipitationMm
+            }
+            WeatherMapLayer.SATELLITE -> WeatherGridField::cloudCoverPct
+            WeatherMapLayer.TEMPERATURE -> WeatherGridField::temperatureC
+            WeatherMapLayer.PRESSURE -> WeatherGridField::pressureHpa
         }
 
-        val invW = 1.0 / (width - 1).coerceAtLeast(1)
-        val invH = 1.0 / (height - 1).coerceAtLeast(1)
+        val invW = 1.0 / width.coerceAtLeast(1)
+        val invH = 1.0 / height.coerceAtLeast(1)
+        val mercNorth = latToMercatorY(base.northLat)
+        val mercSouth = latToMercatorY(base.southLat)
+        val mercSpan = (mercNorth - mercSouth).coerceAtLeast(1e-9)
+        val lonSpan = (base.eastLon - base.westLon).coerceAtLeast(1e-6)
+        val blendStormPrecipAndCape = layer == WeatherMapLayer.STORMS &&
+            stormFieldMode == StormFieldMode.PRECIPITATION_AND_CAPE
 
         for (py in 0 until height) {
-            // Image row 0 corresponds to northLat (normY = 1.0)
-            val normY = 1.0 - py * invH
+            // Image row 0 = northLat; map OpenGL ES texel centers linearly in Web Mercator Y to match MapLibre LatLngQuad
+            val mercY = mercNorth - ((py + 0.5) * invH) * mercSpan
+            val lat = mercatorYToLat(mercY).coerceIn(base.southLat, base.northLat)
             val rowOffset = py * width
             for (px in 0 until width) {
-                val normX = px * invW
-                val value = sampleNormalized(grid, fieldArray, safeHour, normX, normY, smooth = true)
-                pixels[rowOffset + px] = mapValueToArgb(layer, value)
+                val lon = (base.westLon + ((px + 0.5) * invW) * lonSpan).coerceIn(base.westLon, base.eastLon)
+                if (blendStormPrecipAndCape) {
+                    val precip = sampleCompositeScalar(
+                        composite, safeHour, detailHours, lat, lon, smooth = true
+                    ) { it.precipitationMm }.coerceAtLeast(0f)
+                    val cape = sampleCompositeScalar(
+                        composite, safeHour, detailHours, lat, lon, smooth = true
+                    ) { it.capeJkg }.coerceAtLeast(0f)
+                    pixels[rowOffset + px] = mapStormPrecipAndCapeToArgb(precip, cape)
+                } else {
+                    val value = sampleCompositeScalar(
+                        composite, safeHour, detailHours, lat, lon, smooth = true, selector = selector
+                    )
+                    pixels[rowOffset + px] = mapValueToArgb(layer, value)
+                }
             }
         }
         return pixels
@@ -223,13 +480,69 @@ object WeatherFieldMath {
         layer: WeatherMapLayer,
         hourIndex: Int,
         windMetricMode: WindMetricMode = WindMetricMode.SUSTAINED,
-        width: Int = 144,
-        height: Int = 144
+        width: Int = 192,
+        height: Int = 192,
+        stormFieldMode: StormFieldMode = StormFieldMode.CAPE_ONLY
+    ): Bitmap = renderSmoothFieldBitmap(
+        composite = WeatherGridComposite(grid),
+        layer = layer,
+        hourIndex = hourIndex,
+        windMetricMode = windMetricMode,
+        width = width,
+        height = height,
+        stormFieldMode = stormFieldMode
+    )
+
+    fun renderSmoothFieldBitmap(
+        composite: WeatherGridComposite,
+        layer: WeatherMapLayer,
+        hourIndex: Int,
+        windMetricMode: WindMetricMode = WindMetricMode.SUSTAINED,
+        width: Int = 192,
+        height: Int = 192,
+        stormFieldMode: StormFieldMode = StormFieldMode.PRECIPITATION_AND_CAPE
     ): Bitmap {
-        val pixels = renderSmoothFieldPixels(grid, layer, hourIndex, windMetricMode, width, height)
+        val pixels = renderSmoothFieldPixels(
+            composite = composite,
+            layer = layer,
+            hourIndex = hourIndex,
+            windMetricMode = windMetricMode,
+            width = width,
+            height = height,
+            stormFieldMode = stormFieldMode
+        )
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
         return bitmap
+    }
+
+    internal fun mapStormPrecipAndCapeToArgb(precipMmH: Float, capeJkg: Float): Int {
+        if (precipMmH >= 0.12f) {
+            // Smooth zero-origin feathered alpha ramp so light drizzle fades gently with zero halo edges
+            val alpha = when {
+                precipMmH < 0.5f -> {
+                    val t = ((precipMmH - 0.12f) / 0.38f).coerceIn(0f, 1f)
+                    t * t * (3f - 2f * t) * 0.42f
+                }
+                precipMmH < 3.0f -> 0.42f + ((precipMmH - 0.5f) / 2.5f) * 0.30f
+                else -> (0.72f + ((precipMmH - 3.0f) / 18.0f).coerceIn(0f, 0.18f))
+            }.coerceIn(0f, 0.90f)
+            return interpolateColorStops(
+                value = precipMmH,
+                stops = PRECIP_COLOR_STOPS,
+                alphaScale = alpha
+            )
+        }
+        // Outside rain areas, show only meaningful convective storm energy (>= 450 J/kg) softly
+        if (capeJkg >= 450f) {
+            val alpha = ((capeJkg - 450f) / 2200f).coerceIn(0f, 0.42f)
+            return interpolateColorStops(
+                value = capeJkg,
+                stops = CAPE_COLOR_STOPS,
+                alphaScale = alpha
+            )
+        }
+        return 0x00000000
     }
 
     internal fun mapValueToArgb(layer: WeatherMapLayer, value: Float): Int = when (layer) {
@@ -243,7 +556,7 @@ object WeatherFieldMath {
             if (value < 250f) {
                 0x00000000
             } else {
-                val alpha = ((value - 250f) / 1800f).coerceIn(0.08f, 0.68f)
+                val alpha = ((value - 250f) / 1800f).coerceIn(0f, 0.62f)
                 interpolateColorStops(value = value, stops = CAPE_COLOR_STOPS, alphaScale = alpha)
             }
         }
@@ -252,7 +565,7 @@ object WeatherFieldMath {
             if (value < 12f) {
                 0x00000000
             } else {
-                val alpha = ((value - 10f) / 90f).coerceIn(0.05f, 0.82f)
+                val alpha = ((value - 12f) / 88f).coerceIn(0f, 0.82f)
                 interpolateColorStops(value = value, stops = CLOUD_COLOR_STOPS, alphaScale = alpha)
             }
         }
@@ -298,28 +611,56 @@ object WeatherFieldMath {
 
     /**
      * Marching Squares contour extractor producing smooth real sea-level pressure isobars
-     * (every 4 hPa) from an upsampled smooth pressure field.
+     * (every 4 hPa) from an upsampled smooth composite pressure field.
      */
     fun extractIsobarContours(
         grid: WeatherGridField,
         hourIndex: Int,
         stepHpa: Int = 4,
-        sampleRes: Int = 25
+        sampleRes: Int = 29
+    ): List<IsobarContourLine> = extractIsobarContours(
+        composite = WeatherGridComposite(grid),
+        hourIndex = hourIndex,
+        stepHpa = stepHpa,
+        sampleRes = sampleRes
+    )
+
+    fun extractIsobarContours(
+        composite: WeatherGridComposite,
+        hourIndex: Int,
+        stepHpa: Int = 4,
+        sampleRes: Int = 29
     ): List<IsobarContourLine> {
-        if (grid.hourCount <= 0 || grid.rows < 2 || grid.cols < 2) return emptyList()
-        val safeHour = hourIndex.coerceIn(0, grid.hourCount - 1)
+        val base = composite.baseGrid
+        if (base.hourCount <= 0 || base.rows < 2 || base.cols < 2) return emptyList()
+        val safeHour = hourIndex.coerceIn(0, base.hourCount - 1)
+        val detailHours = resolveDetailHourIndices(composite, safeHour)
+
+        val latSpan = base.northLat - base.southLat
+        val lonSpan = base.eastLon - base.westLon
+
+        // Scale Marching Squares lattice dynamically when finer cached detail grids sit inside a wider base
+        val finestDetailStep = composite.detailGrids
+            .filterIndexed { idx, _ -> detailHours.getOrElse(idx) { -1 } >= 0 }
+            .minOfOrNull { it.latStepDeg }
+        val effectiveRes = if (finestDetailStep != null && finestDetailStep > 0.05) {
+            val ratio = (base.latStepDeg / finestDetailStep).coerceIn(1.0, 2.5)
+            (sampleRes * ratio).roundToInt().coerceIn(sampleRes, 65)
+        } else {
+            sampleRes
+        }
 
         // Upsample onto a fine smooth lattice so contour lines curve gracefully like Windy
-        val fine = FloatArray(sampleRes * sampleRes)
+        val fine = FloatArray(effectiveRes * effectiveRes)
         var minP = Float.MAX_VALUE
         var maxP = -Float.MAX_VALUE
-        val inv = 1.0 / (sampleRes - 1)
-        for (r in 0 until sampleRes) {
-            val ny = r * inv
-            for (c in 0 until sampleRes) {
-                val nx = c * inv
-                val p = sampleNormalized(grid, grid.pressureHpa, safeHour, nx, ny, smooth = true)
-                fine[r * sampleRes + c] = p
+        val inv = 1.0 / (effectiveRes - 1)
+        for (r in 0 until effectiveRes) {
+            val lat = base.southLat + (r * inv) * latSpan
+            for (c in 0 until effectiveRes) {
+                val lon = base.westLon + (c * inv) * lonSpan
+                val p = sampleCompositeScalar(composite, safeHour, detailHours, lat, lon, smooth = true) { it.pressureHpa }
+                fine[r * effectiveRes + c] = p
                 if (p < minP) minP = p
                 if (p > maxP) maxP = p
             }
@@ -330,8 +671,6 @@ object WeatherFieldMath {
         val lastLevel = (floor(maxP / stepHpa.toDouble()).toInt()) * stepHpa
         if (firstLevel > lastLevel) return emptyList()
 
-        val latSpan = grid.northLat - grid.southLat
-        val lonSpan = grid.eastLon - grid.westLon
         val contours = mutableListOf<IsobarContourLine>()
 
         var level = firstLevel
@@ -339,12 +678,12 @@ object WeatherFieldMath {
             val iso = level.toFloat()
             val segments = mutableListOf<Pair<GeoPoint, GeoPoint>>()
 
-            for (r in 0 until sampleRes - 1) {
-                for (c in 0 until sampleRes - 1) {
-                    val v00 = fine[r * sampleRes + c]           // bottom-left (south-west)
-                    val v10 = fine[r * sampleRes + (c + 1)]     // bottom-right (south-east)
-                    val v11 = fine[(r + 1) * sampleRes + (c + 1)] // top-right (north-east)
-                    val v01 = fine[(r + 1) * sampleRes + c]     // top-left (north-west)
+            for (r in 0 until effectiveRes - 1) {
+                for (c in 0 until effectiveRes - 1) {
+                    val v00 = fine[r * effectiveRes + c]
+                    val v10 = fine[r * effectiveRes + (c + 1)]
+                    val v11 = fine[(r + 1) * effectiveRes + (c + 1)]
+                    val v01 = fine[(r + 1) * effectiveRes + c]
 
                     var mask = 0
                     if (v00 >= iso) mask = mask or 1
@@ -355,7 +694,7 @@ object WeatherFieldMath {
 
                     fun safeFrac(a: Float, b: Float): Float {
                         val diff = b - a
-                        return if (kotlin.math.abs(diff) > 1e-5f) {
+                        return if (abs(diff) > 1e-5f) {
                             ((iso - a) / diff).coerceIn(0f, 1f)
                         } else {
                             0.5f
@@ -364,26 +703,26 @@ object WeatherFieldMath {
 
                     fun interpPoint(edge: Int): GeoPoint {
                         val (fx, fy) = when (edge) {
-                            0 -> { // bottom (v00 -> v10)
+                            0 -> {
                                 val t = safeFrac(v00, v10)
                                 (c + t) * inv to r * inv
                             }
-                            1 -> { // right (v10 -> v11)
+                            1 -> {
                                 val t = safeFrac(v10, v11)
                                 (c + 1) * inv to (r + t) * inv
                             }
-                            2 -> { // top (v01 -> v11)
+                            2 -> {
                                 val t = safeFrac(v01, v11)
                                 (c + t) * inv to (r + 1) * inv
                             }
-                            else -> { // left (v00 -> v01)
+                            else -> {
                                 val t = safeFrac(v00, v01)
                                 c * inv to (r + t) * inv
                             }
                         }
                         return GeoPoint(
-                            latitude = grid.southLat + fy * latSpan,
-                            longitude = grid.westLon + fx * lonSpan
+                            latitude = base.southLat + fy * latSpan,
+                            longitude = base.westLon + fx * lonSpan
                         )
                     }
 
@@ -405,6 +744,56 @@ object WeatherFieldMath {
             level += stepHpa
         }
         return contours
+    }
+
+    fun findPressureCenters(
+        composite: WeatherGridComposite,
+        hourIndex: Int
+    ): List<PressureCenterMarker> {
+        if (composite.detailGrids.isEmpty()) {
+            return findPressureCenters(composite.baseGrid, hourIndex)
+        }
+        val detailHours = resolveDetailHourIndices(composite, hourIndex)
+        val merged = mutableListOf<PressureCenterMarker>()
+        val coveredFinerGrids = mutableListOf<WeatherGridField>()
+        // detailGrids is ordered coarsest-to-finest; walk finest-to-coarsest so finer centers always win
+        for (i in composite.detailGrids.lastIndex downTo 0) {
+            val dHour = detailHours.getOrElse(i) { -1 }
+            if (dHour < 0) continue
+            val detail = composite.detailGrids[i]
+            for (center in findPressureCenters(detail, dHour)) {
+                val suppressedByFiner = coveredFinerGrids.any { finer ->
+                    finer.latStepDeg < detail.latStepDeg - 0.1 &&
+                        center.latitude in finer.southLat..finer.northLat &&
+                        center.longitude in finer.westLon..finer.eastLon
+                }
+                val duplicateNearby = merged.any { existing ->
+                    existing.isHigh == center.isHigh &&
+                        abs(existing.latitude - center.latitude) <= detail.latStepDeg * 0.6 &&
+                        abs(existing.longitude - center.longitude) <= detail.lonStepDeg * 0.6
+                }
+                if (!suppressedByFiner && !duplicateNearby) {
+                    merged.add(center)
+                }
+            }
+            coveredFinerGrids.add(detail)
+        }
+        // Keep base centers strictly outside covered finer grids so H/L markers don't duplicate or shift
+        for (baseCenter in findPressureCenters(composite.baseGrid, hourIndex)) {
+            val insideDetail = coveredFinerGrids.any { d ->
+                baseCenter.latitude in d.southLat..d.northLat &&
+                    baseCenter.longitude in d.westLon..d.eastLon
+            }
+            val duplicateNearby = merged.any { existing ->
+                existing.isHigh == baseCenter.isHigh &&
+                    abs(existing.latitude - baseCenter.latitude) <= composite.baseGrid.latStepDeg * 0.5 &&
+                    abs(existing.longitude - baseCenter.longitude) <= composite.baseGrid.lonStepDeg * 0.5
+            }
+            if (!insideDetail && !duplicateNearby) {
+                merged.add(baseCenter)
+            }
+        }
+        return merged
     }
 
     /**
@@ -443,7 +832,7 @@ object WeatherFieldMath {
                     }
                 }
                 val neighborMean = neighborSum / 8f
-                val prominence = kotlin.math.abs(centerP - neighborMean)
+                val prominence = abs(centerP - neighborMean)
                 if (isStrictHigh && centerP >= maxOf(1016f, meanP + 1.5f) && prominence >= 0.8f) {
                     centers.add(
                         PressureCenterMarker(
@@ -492,7 +881,6 @@ object WeatherFieldMath {
             chain.addLast(segments[startIdx].first)
             chain.addLast(segments[startIdx].second)
 
-            // Extend tail
             while (true) {
                 val tailKey = keyOf(chain.last())
                 val nextIdx = adjacency[tailKey]?.firstOrNull { !used[it] } ?: break
@@ -501,7 +889,6 @@ object WeatherFieldMath {
                 val nextPt = if (keyOf(seg.first) == tailKey) seg.second else seg.first
                 chain.addLast(nextPt)
             }
-            // Extend head
             while (true) {
                 val headKey = keyOf(chain.first())
                 val prevIdx = adjacency[headKey]?.firstOrNull { !used[it] } ?: break
@@ -524,6 +911,14 @@ object WeatherFieldMath {
         85f to MapWindGale.toArgb(),
         110f to MapWindStorm.toArgb(),
         140f to MapWindHurricane.toArgb()
+    )
+
+    private val PRECIP_COLOR_STOPS: List<Pair<Float, Int>> = listOf(
+        0.12f to MapRainLight.toArgb(),
+        1.2f to MapRainModerate.toArgb(),
+        5.0f to MapRainHeavy.toArgb(),
+        14.0f to MapRainIntense.toArgb(),
+        32.0f to MapRainExtreme.toArgb()
     )
 
     private val CAPE_COLOR_STOPS: List<Pair<Float, Int>> = listOf(

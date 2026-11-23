@@ -406,7 +406,9 @@ fun WeatherMapScreen(
                     }
 
                     WeatherMapLayer.STORMS -> {
-                        if (uiState.hourOffset <= 0 && (uiState.inEumetsatCoverage || uiState.inUsCoverage)) {
+                        val supportsLightning = (uiState.inEumetsatCoverage && uiState.hourOffset <= 0) ||
+                            (uiState.inUsCoverage && uiState.hourOffset == 0)
+                        if (supportsLightning) {
                             MapSubModeChip(
                                 label = "Lightning",
                                 icon = Icons.Default.ElectricBolt,
@@ -415,13 +417,13 @@ fun WeatherMapScreen(
                                 onClick = { controller.toggleLightning() }
                             )
                         }
-                        if (uiState.hourOffset <= 0 && uiState.inEumetsatCoverage) {
+                        if (uiState.hourOffset <= 0 && uiState.tilePlan.rasterLayers.isNotEmpty()) {
                             MapSubModeChip(
-                                label = "Storm Cells",
+                                label = "Storm Energy",
                                 icon = Icons.Default.Thunderstorm,
-                                selected = uiState.showStormCells,
+                                selected = uiState.showStormEnergy,
                                 activeTint = MapHudStormAccent,
-                                onClick = { controller.toggleStormCells() }
+                                onClick = { controller.toggleStormEnergy() }
                             )
                         }
                         if (activeAlert != null && activeAlert.riskLevel.ordinal >= SeverityRiskLevel.HIGH.ordinal) {
@@ -845,8 +847,8 @@ private fun MapBottomTimelineDock(
             .padding(horizontal = SpacingTokens.Medium, vertical = SpacingTokens.Compact),
         verticalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
     ) {
-        // 1. Active Layer Color Legend Bar
-        val stops = uiState.selectedLayer.legendStops
+        // 1. Active Layer Color Legend Bar (honestly reflects active satellite vs model palette)
+        val stops = uiState.tilePlan.legendStops ?: uiState.selectedLayer.legendStops
         Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.Micro)) {
             Box(
                 modifier = Modifier

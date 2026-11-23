@@ -2,6 +2,10 @@ package com.google.weatherapp.data.map
 
 import androidx.compose.ui.graphics.Color
 import com.google.weatherapp.theme.*
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 
 data class MapLegendStop(
     val color: Color,
@@ -96,6 +100,18 @@ enum class SatelliteMode(val label: String) {
     INFRARED("Infrared")
 }
 
+enum class StormFieldMode {
+    /** Renders real Open-Meteo hourly precipitation (mm/h) plus convective CAPE highlights. */
+    PRECIPITATION_AND_CAPE,
+    /** Renders subtle convective instability (CAPE J/kg) glow beneath live satellite/radar rain. */
+    CAPE_ONLY
+}
+
+data class RainViewerRadarFrame(
+    val timestampEpochSec: Long,
+    val path: String
+)
+
 enum class CapeRiskTier(val label: String) {
     CALM("Calm"),
     MARGINAL("Low instability"),
@@ -117,20 +133,21 @@ data class MapViewportBounds(
     val lonSpan: Double get() = (east - west).coerceAtLeast(0.01)
 
     /**
-     * Returns true when [other] sits comfortably inside this grid's fetched area
-     * and zoom hasn't shifted enough to warrant a sharper grid refetch.
+     * Returns true when [other] sits completely inside this grid's geographic bounds.
+     * Deliberately invariant to zooming IN so wind/temperature/storm fields stay
+     * 100% geographically locked instead of jumping when the user pinches to zoom.
      */
-    fun coversViewport(other: MapViewportBounds, maxZoomDelta: Double = 1.05): Boolean {
-        if (kotlin.math.abs(zoom - other.zoom) > maxZoomDelta) return false
-        return other.south >= south &&
-            other.north <= north &&
-            other.west >= west &&
-            other.east <= east
+    fun coversViewport(other: MapViewportBounds, toleranceDeg: Double = 1e-4): Boolean {
+        return other.south >= south - toleranceDeg &&
+            other.north <= north + toleranceDeg &&
+            other.west >= west - toleranceDeg &&
+            other.east <= east + toleranceDeg
     }
 }
 
 /**
- * Immutable 48-hour real meteorological grid fetched in a single Open-Meteo multi-point request.
+ * Immutable 50-hour (-2h past + 48h forecast) real meteorological grid fetched in a single
+ * Open-Meteo multi-point request on a canonical world-locked coordinate lattice.
  * Arrays are laid out as [hourIndex * pointCount + row * cols + col], where row 0 = southLat
  * and col 0 = westLon.
  */
@@ -154,10 +171,13 @@ data class WeatherGridField(
     val cloudCoverPct: FloatArray,
     val pressureHpa: FloatArray,
     val capeJkg: FloatArray,
-    val weatherCode: IntArray
+    val weatherCode: IntArray,
+    val pastHours: Int = 0
 ) {
     val pointCount: Int get() = rows * cols
     val hourCount: Int get() = hourlyTimesUtc.size
+    val latStepDeg: Double get() = (northLat - southLat) / (rows - 1).coerceAtLeast(1)
+    val lonStepDeg: Double get() = (eastLon - westLon) / (cols - 1).coerceAtLeast(1)
 
     fun index(hourIndex: Int, row: Int, col: Int): Int {
         val h = hourIndex.coerceIn(0, (hourCount - 1).coerceAtLeast(0))
@@ -166,6 +186,44 @@ data class WeatherGridField(
         return h * pointCount + r * cols + c
     }
 
+    /**
+     * Resolves a timeline [hourOffset] (e.g. -2..+47 relative to [nowUtc]) to the matching index
+     * in [hourlyTimesUtc]. Prefers exact UTC hour lookup so cached grids stay accurate across
+     * hour rollovers and past-loop scrubs (-1h/-2h), while preserving backwards compatibility for
+     * grids fetched without past hours (`pastHours == 0`) or static fixture timestamps.
+     */
+    fun resolveHourIndex(hourOffset: Int, nowUtc: Instant? = null): Int {
+        if (hourlyTimesUtc.isEmpty()) return 0
+        val maxIndex = hourlyTimesUtc.lastIndex
+
+        fun resolveFromAnchor(anchorInstant: Instant): Int? {
+            val baseHourUtc = anchorInstant.truncatedTo(ChronoUnit.HOURS)
+            val baseIdx = findUtcHourIndex(UTC_HOUR_FORMATTER.format(baseHourUtc))
+            if (baseIdx < 0) return null
+            val targetHourUtc = baseHourUtc.plus(hourOffset.toLong(), ChronoUnit.HOURS)
+            val exactTargetIdx = findUtcHourIndex(UTC_HOUR_FORMATTER.format(targetHourUtc))
+            return if (exactTargetIdx >= 0) {
+                exactTargetIdx
+            } else {
+                (baseIdx + hourOffset).coerceIn(0, maxIndex)
+            }
+        }
+
+        if (nowUtc != null) {
+            resolveFromAnchor(nowUtc)?.let { return it }
+        }
+        if (fetchEpochMs > 0L) {
+            resolveFromAnchor(Instant.ofEpochMilli(fetchEpochMs))?.let { return it }
+        }
+        val fallbackAnchor = pastHours.coerceIn(0, maxIndex)
+        return (fallbackAnchor + hourOffset).coerceIn(0, maxIndex)
+    }
+
+    private fun findUtcHourIndex(utcHourIso: String): Int =
+        hourlyTimesUtc.indexOfFirst { ts ->
+            ts == utcHourIso || ts == "${utcHourIso}Z" || ts == "${utcHourIso}:00Z"
+        }
+
     fun toBounds(): MapViewportBounds = MapViewportBounds(
         south = southLat,
         west = westLon,
@@ -173,6 +231,25 @@ data class WeatherGridField(
         east = eastLon,
         zoom = zoomLevel
     )
+
+    companion object {
+        private val UTC_HOUR_FORMATTER: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:00").withZone(ZoneOffset.UTC)
+    }
+}
+
+/**
+ * Hierarchical zoom-consistent view of real cached Open-Meteo grids.
+ * [baseGrid] covers the full viewport; [detailGrids] (sorted coarsest-to-finest) preserve
+ * previously loaded higher-resolution regions smoothly inside [baseGrid] when zooming out,
+ * so wind vectors, temperatures, and storms over already-viewed regions never shift or flip.
+ */
+data class WeatherGridComposite(
+    val baseGrid: WeatherGridField,
+    val detailGrids: List<WeatherGridField> = emptyList()
+) {
+    val hourCount: Int get() = baseGrid.hourCount
+    fun toBounds(): MapViewportBounds = baseGrid.toBounds()
 }
 
 data class WindVectorSample(
