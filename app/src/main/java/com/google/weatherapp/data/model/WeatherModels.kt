@@ -48,7 +48,20 @@ data class GooglePublicAlert(
     @SerializedName("startTime") val startTime: String? = null,
     @SerializedName("expirationTime") val expirationTime: String? = null,
     @SerializedName("description") val description: String? = null,
-    @SerializedName("instruction") val instruction: List<String>? = null
+    @SerializedName("instruction") val instruction: List<String>? = null,
+    @SerializedName("safetyRecommendations") val safetyRecommendations: List<SafetyRecommendation>? = null,
+    @SerializedName("dataSource") val dataSource: AlertDataSource? = null
+)
+
+data class AlertDataSource(
+    @SerializedName("publisher") val publisher: String? = null,
+    @SerializedName("name") val name: String? = null,
+    @SerializedName("authorityUri") val authorityUri: String? = null
+)
+
+data class SafetyRecommendation(
+    @SerializedName("directive") val directive: String? = null,
+    @SerializedName("subtext") val subtext: String? = null
 )
 
 data class HourlyForecastResponse(

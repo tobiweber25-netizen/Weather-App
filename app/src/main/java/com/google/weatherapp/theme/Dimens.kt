@@ -67,7 +67,7 @@ object ComponentTokens {
     val TempBarWidth: Dp = 88.dp
     val DailyItemDayLabelWidth: Dp = 84.dp
     val DailyRainColumnWidth: Dp = 66.dp
-    val DailyTempLabelWidth: Dp = 36.dp
+    val DailyTempLabelWidth: Dp = 42.dp
     val BentoCardMinHeight: Dp = 164.dp
     val BentoSolarCardHeight: Dp = 152.dp
     val BentoSolarArcHeight: Dp = 64.dp
@@ -86,6 +86,9 @@ object ComponentTokens {
     val LocationSearchMaxHeight: Dp = 460.dp
     val DayDetailMicroBarHeight: Dp = 5.dp
     val LockScreenPreviewMaxWidth: Dp = 220.dp
+    val PageIndicatorDotSize: Dp = 6.dp
+    val PageIndicatorActiveWidth: Dp = 18.dp
+    val PageIndicatorGpsIconSize: Dp = 10.dp
 }
 
 object EffectTokens {

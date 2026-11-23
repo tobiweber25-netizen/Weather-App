@@ -47,7 +47,7 @@ interface OpenMeteoGeocodingService {
     @GET("v1/search")
     suspend fun searchLocations(
         @Query("name") query: String,
-        @Query("count") count: Int = 8,
+        @Query("count") count: Int = 10,
         @Query("language") language: String = "en",
         @Query("format") format: String = "json"
     ): OpenMeteoGeocodingResponse
@@ -145,5 +145,10 @@ data class OpenMeteoGeoResult(
     @SerializedName("latitude") val latitude: Double? = null,
     @SerializedName("longitude") val longitude: Double? = null,
     @SerializedName("country") val country: String? = null,
-    @SerializedName("admin1") val admin1: String? = null
+    @SerializedName("country_code") val countryCode: String? = null,
+    @SerializedName("admin1") val admin1: String? = null,
+    @SerializedName("admin2") val admin2: String? = null,
+    @SerializedName("timezone") val timezone: String? = null,
+    @SerializedName("population") val population: Long? = null,
+    @SerializedName("feature_code") val featureCode: String? = null
 )

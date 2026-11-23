@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -46,6 +48,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.weatherapp.data.model.DailyItem
 import com.google.weatherapp.data.model.HeroWeather
 import com.google.weatherapp.data.model.HourlyItem
+import com.google.weatherapp.data.model.SavedLocation
 import com.google.weatherapp.data.model.SkyThemeType
 import com.google.weatherapp.data.model.WeatherEffectType
 import com.google.weatherapp.theme.*
@@ -54,6 +57,7 @@ import com.google.weatherapp.update.AppUpdateManager
 import com.google.weatherapp.update.UpdateCheckState
 import com.google.weatherapp.update.UpdateDownloadState
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.time.LocalTime
 import sh.calvin.reorderable.ReorderableItem
@@ -70,10 +74,23 @@ fun WeatherScreen(
     modifier: Modifier = Modifier
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val pageStates by viewModel.pageStates.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val savedLocations by viewModel.savedLocations.collectAsStateWithLifecycle()
     val selectedCustomLocation by viewModel.selectedCustomLocation.collectAsStateWithLifecycle()
-    val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
+    val searchState by viewModel.searchState.collectAsStateWithLifecycle()
+
+    val pages = remember(savedLocations) {
+        listOf<SavedLocation?>(null) + savedLocations
+    }
+    val targetPageIndex = remember(selectedCustomLocation, savedLocations) {
+        viewModel.activePageIndex(selectedCustomLocation, savedLocations)
+            .coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+    }
+    val pagerState = rememberPagerState(
+        initialPage = targetPageIndex,
+        pageCount = { pages.size }
+    )
 
     val context = androidx.compose.ui.platform.LocalContext.current
     val notificationPrefs = remember { com.google.weatherapp.notification.NotificationPreferences(context) }
@@ -84,6 +101,24 @@ fun WeatherScreen(
     var showMenu by remember { mutableStateOf(false) }
 
     val coroutineScope = rememberCoroutineScope()
+
+    // Sync user horizontal swipes -> ViewModel active location
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.settledPage }
+            .distinctUntilChanged()
+            .collect { settledPage ->
+                selectedDay = null
+                viewModel.onSwipeToPage(settledPage)
+            }
+    }
+
+    // Sync picker / dot selection -> HorizontalPager smoothly
+    LaunchedEffect(targetPageIndex, pages.size) {
+        val safeTarget = targetPageIndex.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
+        if (pagerState.currentPage != safeTarget) {
+            pagerState.animateScrollToPage(safeTarget)
+        }
+    }
     val updateManager = remember { AppUpdateManager(context) }
     var updateCheckState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Idle) }
     var updateDownloadState by remember { mutableStateOf<UpdateDownloadState>(UpdateDownloadState.Idle) }
@@ -148,13 +183,17 @@ fun WeatherScreen(
 
     var activeEffectOverride by remember { mutableStateOf<WeatherEffectType?>(null) }
 
+    val visiblePageLocation = pages.getOrNull(pagerState.currentPage)
+    val visiblePageKey = WeatherViewModel.pageKeyFor(visiblePageLocation)
+    val visibleUiState = pageStates[visiblePageKey] ?: uiState
+
     val defaultEffect = remember { getDefaultWeatherEffect() }
-    val resolvedEffect = when (val state = uiState) {
+    val resolvedEffect = when (val state = visibleUiState) {
         is WeatherUiState.Success -> activeEffectOverride ?: resolveActiveEffect(state.data.hero)
         else -> defaultEffect
     }
 
-    val isDaytime = when (val state = uiState) {
+    val isDaytime = when (val state = visibleUiState) {
         is WeatherUiState.Success -> {
             if (activeEffectOverride == WeatherEffectType.CLEAR_NIGHT) false
             else if (activeEffectOverride == WeatherEffectType.CLEAR_DAY) true
@@ -163,7 +202,7 @@ fun WeatherScreen(
         else -> defaultEffect != WeatherEffectType.CLEAR_NIGHT
     }
 
-    val sunProgress = (uiState as? WeatherUiState.Success)?.data?.telemetry?.sunProgress ?: 0.5f
+    val sunProgress = (visibleUiState as? WeatherUiState.Success)?.data?.telemetry?.sunProgress ?: 0.5f
     val isGoldenHour = isDaytime && (sunProgress < 0.20f || sunProgress > 0.80f) &&
         (resolvedEffect == WeatherEffectType.CLEAR_DAY || resolvedEffect == WeatherEffectType.CLOUDY)
 
@@ -193,17 +232,24 @@ fun WeatherScreen(
         label = "sky_bottom"
     )
 
-    val listState = rememberLazyListState()
-    val isScrolledPastHero by remember {
-        derivedStateOf {
-            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 190
-        }
-    }
+    var isScrolledPastHero by remember { mutableStateOf(false) }
     val topBarScrimAlpha by animateFloatAsState(
         targetValue = if (isScrolledPastHero) 1f else 0f,
         animationSpec = tween(durationMillis = 260),
         label = "topbar_scrim_alpha"
     )
+
+    var widgetOrder by remember {
+        mutableStateOf(
+            listOf(
+                DashboardSection.HERO,
+                DashboardSection.ALERT,
+                DashboardSection.HOURLY,
+                DashboardSection.DAILY,
+                DashboardSection.TELEMETRY
+            )
+        )
+    }
 
     CompositionLocalProvider(LocalSkyIsBright provides isBrightSky) {
         Box(
@@ -252,7 +298,7 @@ fun WeatherScreen(
                     }
                 }
         ) {
-            if (uiState is WeatherUiState.Success) {
+            if (visibleUiState is WeatherUiState.Success) {
                 WeatherEffectOverlay(
                     effectType = resolvedEffect,
                     modifier = Modifier.fillMaxSize()
@@ -338,7 +384,7 @@ fun WeatherScreen(
                                         color = SkyTextPrimary
                                     )
 
-                                    val successHero = (uiState as? WeatherUiState.Success)?.data?.hero
+                                    val successHero = (visibleUiState as? WeatherUiState.Success)?.data?.hero
                                     AnimatedVisibility(
                                         visible = isScrolledPastHero && successHero != null,
                                         enter = fadeIn(tween(220)),
@@ -520,217 +566,247 @@ fun WeatherScreen(
                 containerColor = Color.Transparent,
                 modifier = Modifier.fillMaxSize()
             ) { paddingValues ->
-                // Full-bleed edge-to-edge scroll content glides smoothly behind the floating glass header
-                val pullToRefreshState = rememberPullToRefreshState()
-                PullToRefreshBox(
-                    isRefreshing = isRefreshing,
-                    onRefresh = { viewModel.refresh() },
-                    state = pullToRefreshState,
-                    indicator = {
-                        PullToRefreshDefaults.Indicator(
+                // Full-bleed edge-to-edge swipeable city pages gliding smoothly behind the floating glass header
+                Box(modifier = Modifier.fillMaxSize()) {
+                    HorizontalPager(
+                        state = pagerState,
+                        key = { index -> WeatherViewModel.pageKeyFor(pages.getOrNull(index)) },
+                        beyondViewportPageCount = 1,
+                        modifier = Modifier.fillMaxSize()
+                    ) { pageIndex ->
+                        val pageLocation = pages.getOrNull(pageIndex)
+                        val pageKey = WeatherViewModel.pageKeyFor(pageLocation)
+                        val pageState = pageStates[pageKey] ?: WeatherUiState.Loading
+                        val isCurrentPage = pageIndex == pagerState.currentPage
+                        val pageListState = rememberLazyListState()
+                        val pageScrolledPastHero by remember(pageListState) {
+                            derivedStateOf {
+                                pageListState.firstVisibleItemIndex > 0 || pageListState.firstVisibleItemScrollOffset > 190
+                            }
+                        }
+                        LaunchedEffect(isCurrentPage, pageScrolledPastHero) {
+                            if (isCurrentPage) {
+                                isScrolledPastHero = pageScrolledPastHero
+                            }
+                        }
+
+                        val pullToRefreshState = rememberPullToRefreshState()
+                        PullToRefreshBox(
+                            isRefreshing = isRefreshing && isCurrentPage,
+                            onRefresh = { viewModel.refresh() },
                             state = pullToRefreshState,
-                            isRefreshing = isRefreshing,
-                            modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(top = paddingValues.calculateTopPadding())
-                        )
-                    },
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    when (val state = uiState) {
-                        is WeatherUiState.Loading -> {
-                            WeatherSkeletonPlaceholder(
-                                modifier = Modifier.padding(top = paddingValues.calculateTopPadding())
-                            )
-                        }
-                        is WeatherUiState.Error -> {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(paddingValues)
-                                    .padding(SpacingTokens.Base),
-                                verticalArrangement = Arrangement.Center,
-                                horizontalAlignment = Alignment.CenterHorizontally
-                            ) {
-                                Column(
+                            indicator = {
+                                PullToRefreshDefaults.Indicator(
+                                    state = pullToRefreshState,
+                                    isRefreshing = isRefreshing && isCurrentPage,
                                     modifier = Modifier
-                                        .luminousGlass(cornerRadius = CornerTokens.Large, elevated = true)
-                                        .padding(SpacingTokens.ExtraLarge),
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Text(
-                                        text = "Unable to load weather",
-                                        style = MaterialTheme.typography.headlineMedium,
-                                        color = SkyTextPrimary
+                                        .align(Alignment.TopCenter)
+                                        .padding(top = paddingValues.calculateTopPadding())
+                                )
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            when (val state = pageState) {
+                                is WeatherUiState.Loading -> {
+                                    WeatherSkeletonPlaceholder(
+                                        modifier = Modifier.padding(top = paddingValues.calculateTopPadding())
                                     )
-                                    Spacer(modifier = Modifier.height(SpacingTokens.Small))
-                                    Text(
-                                        text = state.message,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = SkyTextSecondary
-                                    )
-                                    Spacer(modifier = Modifier.height(SpacingTokens.Large))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)) {
-                                        Button(
-                                            onClick = { viewModel.loadWeatherData() },
-                                            shape = RoundedCornerShape(CornerTokens.Pill)
+                                }
+                                is WeatherUiState.Error -> {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(paddingValues)
+                                            .padding(SpacingTokens.Base),
+                                        verticalArrangement = Arrangement.Center,
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .luminousGlass(cornerRadius = CornerTokens.Large, elevated = true)
+                                                .padding(SpacingTokens.ExtraLarge),
+                                            horizontalAlignment = Alignment.CenterHorizontally
                                         ) {
-                                            Text("Retry")
+                                            Text(
+                                                text = if (pageLocation != null) {
+                                                    "Unable to load ${pageLocation.name}"
+                                                } else {
+                                                    "Unable to load weather"
+                                                },
+                                                style = MaterialTheme.typography.headlineMedium,
+                                                color = SkyTextPrimary
+                                            )
+                                            Spacer(modifier = Modifier.height(SpacingTokens.Small))
+                                            Text(
+                                                text = state.message,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = SkyTextSecondary
+                                            )
+                                            Spacer(modifier = Modifier.height(SpacingTokens.Large))
+                                            Row(horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)) {
+                                                Button(
+                                                    onClick = { viewModel.retryPage(pageLocation) },
+                                                    shape = RoundedCornerShape(CornerTokens.Pill)
+                                                ) {
+                                                    Text("Retry")
+                                                }
+                                                OutlinedButton(
+                                                    onClick = { showLocationPicker = true },
+                                                    shape = RoundedCornerShape(CornerTokens.Pill),
+                                                    border = BorderStroke(BorderTokens.Hairline, GlassCardBorderLight)
+                                                ) {
+                                                    Text("Pick a Place", color = SkyTextPrimary)
+                                                }
+                                            }
                                         }
-                                        OutlinedButton(
-                                            onClick = { showLocationPicker = true },
-                                            shape = RoundedCornerShape(CornerTokens.Pill),
-                                            border = BorderStroke(BorderTokens.Hairline, GlassCardBorderLight)
-                                        ) {
-                                            Text("Pick a City", color = SkyTextPrimary)
+                                    }
+                                }
+                                is WeatherUiState.Success -> {
+                                    val data = state.data
+                                    val reorderableState = rememberReorderableLazyListState(pageListState) { from, to ->
+                                        val fromIdx = widgetOrder.indexOfFirst { it.name == from.key }
+                                        val toIdx = widgetOrder.indexOfFirst { it.name == to.key }
+                                        if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
+                                            widgetOrder = widgetOrder.toMutableList().apply {
+                                                add(toIdx, removeAt(fromIdx))
+                                            }
+                                        }
+                                    }
+
+                                    LazyColumn(
+                                        state = pageListState,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentPadding = PaddingValues(
+                                            top = paddingValues.calculateTopPadding() + SpacingTokens.ExtraSmall,
+                                            bottom = paddingValues.calculateBottomPadding() + SpacingTokens.Base
+                                        ),
+                                        verticalArrangement = Arrangement.spacedBy(SpacingTokens.Base)
+                                    ) {
+                                        items(widgetOrder, key = { it.name }) { widget ->
+                                            ReorderableItem(reorderableState, key = widget.name) { isDragging ->
+                                                val dragScale by animateFloatAsState(
+                                                    targetValue = if (isDragging) 1.02f else 1f,
+                                                    animationSpec = tween(160),
+                                                    label = "drag_scale"
+                                                )
+                                                val baseModifier = Modifier
+                                                    .longPressDraggableHandle()
+                                                    .graphicsLayer {
+                                                        scaleX = dragScale
+                                                        scaleY = dragScale
+                                                    }
+                                                val widgetModifier = if (isDragging) {
+                                                    baseModifier
+                                                        .padding(horizontal = SpacingTokens.ExtraSmall)
+                                                        .border(
+                                                            width = BorderTokens.Subtle,
+                                                            color = GlassActiveBorderGold,
+                                                            shape = RoundedCornerShape(CornerTokens.Large)
+                                                        )
+                                                } else {
+                                                    baseModifier
+                                                }
+
+                                                when (widget) {
+                                                    DashboardSection.HERO -> HeroWeatherSection(
+                                                        hero = data.hero,
+                                                        hourlyList = data.hourlyList,
+                                                        nowcast = data.nowcast,
+                                                        telemetry = data.telemetry,
+                                                        alert = data.alert,
+                                                        locationTimezone = data.timezone ?: pageLocation?.timezone,
+                                                        isCurrentGps = pageIndex == 0,
+                                                        pageCount = pages.size,
+                                                        activePageIndex = pageIndex,
+                                                        onSelectPageIndex = { idx ->
+                                                            coroutineScope.launch {
+                                                                pagerState.animateScrollToPage(idx)
+                                                            }
+                                                        },
+                                                        onLocationClick = { showLocationPicker = true },
+                                                        modifier = widgetModifier
+                                                    )
+                                                    DashboardSection.ALERT -> SevereWeatherAlertPill(
+                                                        alert = data.alert,
+                                                        modifier = widgetModifier
+                                                    )
+                                                    DashboardSection.HOURLY -> HourlyForecastStrip(
+                                                        hourlyItems = data.hourlyList,
+                                                        modifier = widgetModifier
+                                                    )
+                                                    DashboardSection.DAILY -> DailyForecastList(
+                                                        dailyList = data.dailyList,
+                                                        currentTemp = data.hero.tempDegrees,
+                                                        onDayClick = { selectedDay = it },
+                                                        modifier = widgetModifier
+                                                    )
+                                                    DashboardSection.TELEMETRY -> BentoTelemetryGrid(
+                                                        telemetry = data.telemetry,
+                                                        hourlyList = data.hourlyList,
+                                                        isDaytime = data.hero.isDaytime,
+                                                        modifier = widgetModifier
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        item {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(top = SpacingTokens.Medium, bottom = SpacingTokens.ExtraLarge),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
+                                                    modifier = Modifier
+                                                        .luminousGlass(cornerRadius = CornerTokens.Pill)
+                                                        .clickable {
+                                                            Toast.makeText(
+                                                                context,
+                                                                "Almanac v${com.google.weatherapp.BuildConfig.VERSION_NAME} (Code ${com.google.weatherapp.BuildConfig.VERSION_CODE})",
+                                                                Toast.LENGTH_LONG
+                                                            ).show()
+                                                        }
+                                                        .padding(
+                                                            horizontal = SpacingTokens.Medium,
+                                                            vertical = SpacingTokens.ExtraSmall
+                                                        )
+                                                ) {
+                                                    Text(
+                                                        text = "Almanac",
+                                                        style = EditorialStoryTextStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
+                                                        color = SkyTextSecondary
+                                                    )
+                                                    Text(
+                                                        text = "·",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = SkyTextMuted
+                                                    )
+                                                    Text(
+                                                        text = "v${com.google.weatherapp.BuildConfig.VERSION_NAME}",
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = SkyTextSecondary
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                        is WeatherUiState.Success -> {
-                            val data = state.data
-                            var widgetOrder by remember {
-                                mutableStateOf(
-                                    listOf(
-                                        DashboardSection.HERO,
-                                        DashboardSection.ALERT,
-                                        DashboardSection.HOURLY,
-                                        DashboardSection.DAILY,
-                                        DashboardSection.TELEMETRY
-                                    )
-                                )
-                            }
-                            val reorderableState = rememberReorderableLazyListState(listState) { from, to ->
-                                val fromIdx = widgetOrder.indexOfFirst { it.name == from.key }
-                                val toIdx = widgetOrder.indexOfFirst { it.name == to.key }
-                                if (fromIdx >= 0 && toIdx >= 0 && fromIdx != toIdx) {
-                                    widgetOrder = widgetOrder.toMutableList().apply {
-                                        add(toIdx, removeAt(fromIdx))
-                                    }
-                                }
-                            }
+                    }
 
-                            LazyColumn(
-                                state = listState,
-                                modifier = Modifier.fillMaxSize(),
-                                contentPadding = PaddingValues(
-                                    top = paddingValues.calculateTopPadding() + SpacingTokens.ExtraSmall,
-                                    bottom = paddingValues.calculateBottomPadding() + SpacingTokens.Base
-                                ),
-                                verticalArrangement = Arrangement.spacedBy(SpacingTokens.Base)
-                            ) {
-                                items(widgetOrder, key = { it.name }) { widget ->
-                                    ReorderableItem(reorderableState, key = widget.name) { isDragging ->
-                                        val dragScale by animateFloatAsState(
-                                            targetValue = if (isDragging) 1.02f else 1f,
-                                            animationSpec = tween(160),
-                                            label = "drag_scale"
-                                        )
-                                        val baseModifier = Modifier
-                                            .longPressDraggableHandle()
-                                            .graphicsLayer {
-                                                scaleX = dragScale
-                                                scaleY = dragScale
-                                            }
-                                        val widgetModifier = if (isDragging) {
-                                            baseModifier
-                                                .padding(horizontal = SpacingTokens.ExtraSmall)
-                                                .border(
-                                                    width = BorderTokens.Subtle,
-                                                    color = GlassActiveBorderGold,
-                                                    shape = RoundedCornerShape(CornerTokens.Large)
-                                                )
-                                        } else {
-                                            baseModifier
-                                        }
-
-                                        when (widget) {
-                                            DashboardSection.HERO -> HeroWeatherSection(
-                                                hero = data.hero,
-                                                hourlyList = data.hourlyList,
-                                                nowcast = data.nowcast,
-                                                telemetry = data.telemetry,
-                                                alert = data.alert,
-                                                onLocationClick = { showLocationPicker = true },
-                                                modifier = widgetModifier
-                                            )
-                                            DashboardSection.ALERT -> SevereWeatherAlertPill(
-                                                alert = data.alert,
-                                                modifier = widgetModifier
-                                            )
-                                            DashboardSection.HOURLY -> HourlyForecastStrip(
-                                                hourlyItems = data.hourlyList,
-                                                modifier = widgetModifier
-                                            )
-                                            DashboardSection.DAILY -> DailyForecastList(
-                                                dailyList = data.dailyList,
-                                                currentTemp = data.hero.tempDegrees,
-                                                onDayClick = { selectedDay = it },
-                                                modifier = widgetModifier
-                                            )
-                                            DashboardSection.TELEMETRY -> BentoTelemetryGrid(
-                                                telemetry = data.telemetry,
-                                                hourlyList = data.hourlyList,
-                                                isDaytime = data.hero.isDaytime,
-                                                modifier = widgetModifier
-                                            )
-                                        }
-                                    }
-                                }
-                                item {
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(top = SpacingTokens.Medium, bottom = SpacingTokens.ExtraLarge),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Row(
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
-                                            modifier = Modifier
-                                                .luminousGlass(cornerRadius = CornerTokens.Pill)
-                                                .clickable {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Almanac v${com.google.weatherapp.BuildConfig.VERSION_NAME} (Code ${com.google.weatherapp.BuildConfig.VERSION_CODE})",
-                                                        Toast.LENGTH_LONG
-                                                    ).show()
-                                                }
-                                                .padding(
-                                                    horizontal = SpacingTokens.Medium,
-                                                    vertical = SpacingTokens.ExtraSmall
-                                                )
-                                        ) {
-                                            Text(
-                                                text = "Almanac",
-                                                style = EditorialStoryTextStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
-                                                color = SkyTextSecondary
-                                            )
-                                            Text(
-                                                text = "·",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = SkyTextMuted
-                                            )
-                                            Text(
-                                                text = "v${com.google.weatherapp.BuildConfig.VERSION_NAME}",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.SemiBold,
-                                                color = SkyTextSecondary
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-
-                            selectedDay?.let { currentDay ->
-                                DayDetailModalSheet(
-                                    day = currentDay,
-                                    allDays = data.dailyList,
-                                    onSelectDay = { selectedDay = it },
-                                    onDismiss = { selectedDay = null }
-                                )
-                            }
+                    val activeSuccessData = (visibleUiState as? WeatherUiState.Success)?.data
+                    selectedDay?.let { currentDay ->
+                        if (activeSuccessData != null) {
+                            DayDetailModalSheet(
+                                day = currentDay,
+                                allDays = activeSuccessData.dailyList,
+                                onSelectDay = { selectedDay = it },
+                                onDismiss = { selectedDay = null }
+                            )
                         }
                     }
 
@@ -738,7 +814,7 @@ fun WeatherScreen(
                         LocationPickerSheet(
                             savedLocations = savedLocations,
                             selectedCustomLocation = selectedCustomLocation,
-                            searchResults = searchResults,
+                            searchState = searchState,
                             onSearchQueryChanged = { viewModel.searchCities(it) },
                             onSelectLocation = { loc ->
                                 viewModel.selectLocation(loc)
@@ -753,7 +829,7 @@ fun WeatherScreen(
                     }
 
                     if (showNotificationSheet) {
-                        val successData = (uiState as? WeatherUiState.Success)?.data
+                        val successData = (visibleUiState as? WeatherUiState.Success)?.data
                         EveningForecastSheet(
                             weatherData = successData,
                             onDismiss = { showNotificationSheet = false }

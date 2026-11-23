@@ -11,6 +11,10 @@ import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
+import com.google.weatherapp.data.api.ApiClient
+import com.google.weatherapp.data.api.PhotonGeocodingService
+import com.google.weatherapp.data.repository.LocationSearchEngine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.tasks.await
@@ -20,7 +24,10 @@ import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.math.abs
 
-class LocationClient(private val context: Context) {
+class LocationClient(
+    private val context: Context,
+    private val photonService: PhotonGeocodingService = ApiClient.photonGeocodingService
+) {
 
     private val fusedClient: FusedLocationProviderClient =
         LocationServices.getFusedLocationProviderClient(context)
@@ -128,6 +135,14 @@ class LocationClient(private val context: Context) {
     }
 
     private suspend fun resolveLocationName(lat: Double, lon: Double): String? {
+        val androidName = resolveViaAndroidGeocoder(lat, lon)
+        if (!androidName.isNullOrBlank()) return androidName
+
+        // Global backup when Android Geocoder is unavailable, times out, or lacks coverage
+        return resolveViaPhotonReverseGeocode(lat, lon)
+    }
+
+    private suspend fun resolveViaAndroidGeocoder(lat: Double, lon: Double): String? {
         return try {
             if (!Geocoder.isPresent()) return null
             val geocoder = Geocoder(context, Locale.getDefault())
@@ -162,6 +177,22 @@ class LocationClient(private val context: Context) {
             } else {
                 null
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun resolveViaPhotonReverseGeocode(lat: Double, lon: Double): String? {
+        return try {
+            withTimeoutOrNull(3500L) {
+                val response = photonService.reverseGeocode(latitude = lat, longitude = lon)
+                val firstProps = response.features?.firstOrNull()?.properties
+                LocationSearchEngine.formatReverseGeocodeName(firstProps)
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (_: Exception) {
             null
         }

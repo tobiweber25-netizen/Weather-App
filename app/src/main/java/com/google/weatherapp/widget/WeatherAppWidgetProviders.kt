@@ -123,7 +123,9 @@ object WeatherWidgetUpdater {
                 repo.getWeatherData(
                     latitude = customLoc.latitude,
                     longitude = customLoc.longitude,
-                    resolvedLocationName = customLoc.name
+                    resolvedLocationName = customLoc.name,
+                    fallbackTimezone = customLoc.timezone,
+                    targetLocation = customLoc
                 )
             } else {
                 val coords = LocationClient(appContext).fetchLocation(forceFresh = false)
@@ -132,20 +134,12 @@ object WeatherWidgetUpdater {
                         latitude = coords.latitude,
                         longitude = coords.longitude,
                         resolvedLocationName = coords.locationName,
-                        altitude = coords.altitude
+                        altitude = coords.altitude,
+                        targetLocation = null
                     )
                 } else {
-                    val fallbackCity = repo.getSavedLocations().firstOrNull()
-                    if (fallbackCity != null) {
-                        // Do not overwrite deviceWeather with a fallback saved city when GPS is unavailable.
-                        WeatherRepository(localDataSource = null).getWeatherData(
-                            latitude = fallbackCity.latitude,
-                            longitude = fallbackCity.longitude,
-                            resolvedLocationName = fallbackCity.name
-                        )
-                    } else {
-                        localSource.getLatestCachedWeatherIgnoringTtl()
-                    }
+                    // Never substitute a different saved city when GPS is unavailable.
+                    localSource.getDeviceWeather() ?: localSource.getLatestCachedWeatherIgnoringTtl()
                 }
             }
         } catch (_: Exception) {

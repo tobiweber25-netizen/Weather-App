@@ -43,6 +43,12 @@ internal object WeatherConsensus {
         MODEL_ECMWF_AIFS
     )
 
+    private val REGIONAL_SEAMLESS_BASE_MODELS = setOf(
+        MODEL_UKMO,
+        MODEL_ICON,
+        MODEL_GFS
+    )
+
     internal data class MultiModelHourSlot(
         val tempsByModel: Map<String, Double>,
         val precipByModel: Map<String, Double>,
@@ -52,7 +58,8 @@ internal object WeatherConsensus {
     internal data class MultiModelConsensusData(
         val hourlyByTime: Map<String, MultiModelHourSlot>,
         val activeModels: List<String>,
-        val hasDistinctRegionalModel: Boolean
+        val hasDistinctRegionalModel: Boolean,
+        val promotedRegionalModelId: String? = null
     )
 
     internal data class AirQualitySummary(
@@ -83,13 +90,22 @@ internal object WeatherConsensus {
 
         if (tempArrays.isEmpty() && precipArrays.isEmpty()) return null
 
-        // Deduplicate best_match whenever it aliases one of the explicit global models
-        // (e.g., in South Africa best_match == ecmwf_ifs; in UK best_match == ukmo_seamless).
+        // Deduplicate best_match whenever it aliases one of the explicit global/seamless models
+        // (e.g., in South Africa best_match == ecmwf_ifs; in US best_match == gfs_seamless (HRRR 3km);
+        // in Germany best_match == icon_seamless (ICON-D2 2km); in UK best_match == ukmo_seamless (UKV 2km)).
+        // When best_match aliases a regional high-res seamless model, promote that model's weight so
+        // HRRR / ICON-D2 / UKV retain top regional skill weight without double-counting!
         val bestTemps = tempArrays[MODEL_BEST_MATCH]
-        val bestMatchIsDuplicate = bestTemps != null && GLOBAL_BASE_MODELS.any { globalModel ->
-            val otherTemps = tempArrays[globalModel] ?: return@any false
-            seriesMatches(bestTemps, otherTemps)
+        val matchedBaseModel = if (bestTemps != null) {
+            GLOBAL_BASE_MODELS.firstOrNull { globalModel ->
+                val otherTemps = tempArrays[globalModel] ?: return@firstOrNull false
+                seriesMatches(bestTemps, otherTemps)
+            }
+        } else {
+            null
         }
+        val bestMatchIsDuplicate = matchedBaseModel != null
+        val promotedRegionalModelId = matchedBaseModel?.takeIf { it in REGIONAL_SEAMLESS_BASE_MODELS }
         val activeModels = ALL_OPEN_METEO_MODELS.filter { model ->
             if (model == MODEL_BEST_MATCH && bestMatchIsDuplicate) {
                 false
@@ -125,11 +141,24 @@ internal object WeatherConsensus {
         return MultiModelConsensusData(
             hourlyByTime = hourlyByTime,
             activeModels = activeModels,
-            hasDistinctRegionalModel = activeModels.contains(MODEL_BEST_MATCH)
+            hasDistinctRegionalModel = activeModels.contains(MODEL_BEST_MATCH),
+            promotedRegionalModelId = promotedRegionalModelId
         )
     }
 
-    internal fun modelWeight(modelId: String, leadHours: Int): Double {
+    internal fun modelWeight(
+        modelId: String,
+        leadHours: Int,
+        promotedRegionalModelId: String? = null
+    ): Double {
+        val baseWeight = baseModelWeight(modelId, leadHours)
+        if (promotedRegionalModelId != null && modelId == promotedRegionalModelId) {
+            return maxOf(baseWeight, baseModelWeight(MODEL_BEST_MATCH, leadHours))
+        }
+        return baseWeight
+    }
+
+    private fun baseModelWeight(modelId: String, leadHours: Int): Double {
         return when {
             leadHours <= 0 -> when (modelId) {
                 MODEL_BEST_MATCH -> 0.28
@@ -187,7 +216,8 @@ internal object WeatherConsensus {
     internal fun blendConsensusTemperature(
         googleTemp: Double?,
         modelTemps: Map<String, Double>,
-        leadHours: Int
+        leadHours: Int,
+        promotedRegionalModelId: String? = null
     ): Double? {
         val entries = mutableListOf<Pair<Double, Double>>() // (value, weight)
 
@@ -196,7 +226,7 @@ internal object WeatherConsensus {
             val gW = googleWeight(0)
             val omWTotal = 1.0 - gW
             val omConsensus = weightedAverageWithOutlierGuard(
-                modelTemps.entries.map { (id, v) -> v to modelWeight(id, 0) }
+                modelTemps.entries.map { (id, v) -> v to modelWeight(id, 0, promotedRegionalModelId) }
             )
             return if (omConsensus != null) {
                 googleTemp * gW + omConsensus * omWTotal
@@ -209,7 +239,7 @@ internal object WeatherConsensus {
             entries.add(googleTemp to googleWeight(leadHours))
         }
         modelTemps.forEach { (id, temp) ->
-            entries.add(temp to modelWeight(id, leadHours))
+            entries.add(temp to modelWeight(id, leadHours, promotedRegionalModelId))
         }
         return weightedAverageWithOutlierGuard(entries)
     }
@@ -221,14 +251,15 @@ internal object WeatherConsensus {
     internal fun blendConsensusRainProbability(
         googlePop: Int?,
         modelPops: Map<String, Int>,
-        leadHours: Int
+        leadHours: Int,
+        promotedRegionalModelId: String? = null
     ): Int? {
         val entries = mutableListOf<Pair<Double, Double>>()
         if (googlePop != null) {
             entries.add(googlePop.coerceIn(0, 100).toDouble() to googleWeight(leadHours))
         }
         modelPops.forEach { (id, pop) ->
-            entries.add(pop.coerceIn(0, 100).toDouble() to modelWeight(id, leadHours))
+            entries.add(pop.coerceIn(0, 100).toDouble() to modelWeight(id, leadHours, promotedRegionalModelId))
         }
         if (entries.isEmpty()) return null
         val totalW = entries.sumOf { it.second }.takeIf { it > 0.0 } ?: return null
@@ -242,14 +273,15 @@ internal object WeatherConsensus {
     internal fun blendConsensusPrecipMm(
         googlePrecipMm: Double?,
         modelPrecipsMm: Map<String, Double>,
-        leadHours: Int
+        leadHours: Int,
+        promotedRegionalModelId: String? = null
     ): Double? {
         val entries = mutableListOf<Pair<Double, Double>>()
         if (googlePrecipMm != null) {
             entries.add(googlePrecipMm.coerceAtLeast(0.0) to googleWeight(leadHours))
         }
         modelPrecipsMm.forEach { (id, mm) ->
-            entries.add(mm.coerceAtLeast(0.0) to modelWeight(id, leadHours))
+            entries.add(mm.coerceAtLeast(0.0) to modelWeight(id, leadHours, promotedRegionalModelId))
         }
         if (entries.isEmpty()) return null
         val totalW = entries.sumOf { it.second }.takeIf { it > 0.0 } ?: return null
@@ -503,6 +535,25 @@ internal object WeatherConsensus {
         eaqi <= 80 -> "Poor"
         eaqi <= 100 -> "Very Poor"
         else -> "Extremely Poor"
+    }
+
+    internal fun isPoorAirQuality(
+        aqiValue: Int,
+        scaleLabel: String,
+        pm25: Double,
+        category: String
+    ): Boolean {
+        val markedUnavailable = category.equals("Unavailable", ignoreCase = true) ||
+            category.equals("N/A", ignoreCase = true)
+        if (markedUnavailable && aqiValue <= 0 && pm25 <= 0.0) {
+            return false
+        }
+        val poorIndex = if (scaleLabel.contains("EU", ignoreCase = true)) {
+            aqiValue > 60
+        } else {
+            aqiValue > 100
+        }
+        return poorIndex || pm25 > 35.0
     }
 
     internal fun resolveDominantPollutantLabel(

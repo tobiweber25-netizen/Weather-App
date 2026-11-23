@@ -43,6 +43,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.google.weatherapp.data.model.WeatherDashboardData
+import com.google.weatherapp.data.repository.WeatherMapper
 import com.google.weatherapp.notification.NotificationPreferences
 import com.google.weatherapp.notification.TestNotificationType
 import com.google.weatherapp.notification.WeatherNotificationScheduler
@@ -154,11 +155,7 @@ fun EveningForecastSheet(
     val morningSummary = remember(weatherData) {
         val dailyList = weatherData?.dailyList
         if (!dailyList.isNullOrEmpty()) {
-            val zoneId = try {
-                if (!weatherData.timezone.isNullOrBlank()) java.time.ZoneId.of(weatherData.timezone) else java.time.ZoneId.systemDefault()
-            } catch (_: Exception) {
-                java.time.ZoneId.systemDefault()
-            }
+            val zoneId = WeatherMapper.resolveZoneId(weatherData.timezone)
             val todayDate = java.time.LocalDate.now(zoneId)
             val todayStr = "${todayDate.monthValue}/${todayDate.dayOfMonth}"
             val today = dailyList.firstOrNull { it.dateText == todayStr } ?: dailyList.first()
@@ -179,12 +176,8 @@ fun EveningForecastSheet(
 
     val eveningSummary = remember(weatherData) {
         val dailyList = weatherData?.dailyList
-        if (!dailyList.isNullOrEmpty()) {
-            val zoneId = try {
-                if (!weatherData.timezone.isNullOrBlank()) java.time.ZoneId.of(weatherData.timezone) else java.time.ZoneId.systemDefault()
-            } catch (_: Exception) {
-                java.time.ZoneId.systemDefault()
-            }
+        if (!dailyList.isNullOrEmpty() && dailyList.size >= 2) {
+            val zoneId = WeatherMapper.resolveZoneId(weatherData.timezone)
             val todayDate = java.time.LocalDate.now(zoneId)
             val todayStr = "${todayDate.monthValue}/${todayDate.dayOfMonth}"
             val tomorrowDate = todayDate.plusDays(1)

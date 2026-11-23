@@ -11,12 +11,19 @@ object ApiClient {
     private const val OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/"
     private const val OPEN_METEO_AQI_URL = "https://air-quality-api.open-meteo.com/"
     private const val OPEN_METEO_GEO_URL = "https://geocoding-api.open-meteo.com/"
+    private const val PHOTON_GEO_URL = "https://photon.komoot.io/"
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
         level = HttpLoggingInterceptor.Level.BASIC
     }
 
     internal val okHttpClient = OkHttpClient.Builder().apply {
+        addInterceptor { chain ->
+            val request = chain.request().newBuilder()
+                .header("User-Agent", "AlmanacWeatherApp/1.0 (Android)")
+                .build()
+            chain.proceed(request)
+        }
         if (com.google.weatherapp.BuildConfig.DEBUG) {
             addInterceptor(loggingInterceptor)
         }
@@ -59,6 +66,15 @@ object ApiClient {
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(OpenMeteoGeocodingService::class.java)
+    }
+
+    val photonGeocodingService: PhotonGeocodingService by lazy {
+        Retrofit.Builder()
+            .baseUrl(PHOTON_GEO_URL)
+            .client(okHttpClient)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(PhotonGeocodingService::class.java)
     }
 
 }

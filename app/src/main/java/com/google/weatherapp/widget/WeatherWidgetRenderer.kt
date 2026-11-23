@@ -63,9 +63,10 @@ object WeatherWidgetRenderer {
         style: WidgetBackgroundStyle,
         data: WeatherDashboardData?,
         widthDp: Int = kind.defaultWidthDp,
-        heightDp: Int = kind.defaultHeightDp
+        heightDp: Int = kind.defaultHeightDp,
+        useSampleWhenEmpty: Boolean = false
     ): Bitmap {
-        val weather = data ?: samplePreviewDashboardData()
+        val weather = data ?: if (useSampleWhenEmpty) samplePreviewDashboardData() else null
         val density = context.resources.displayMetrics.density.coerceIn(1.5f, 3.0f)
         val fonts = loadTypefaces(context)
 
@@ -89,9 +90,26 @@ object WeatherWidgetRenderer {
 
         val w = widthPx.toFloat()
         val h = heightPx.toFloat()
+        val isTranslucent = style == WidgetBackgroundStyle.TRANSLUCENT
+
+        if (weather == null) {
+            if (!(kind == WidgetKind.LOCK_SCREEN && isTranslucent)) {
+                drawCardBackground(
+                    canvas = canvas,
+                    w = w,
+                    h = h,
+                    density = renderDensity,
+                    effect = WeatherEffectType.CLEAR_NIGHT,
+                    style = style,
+                    isDaytime = false
+                )
+            }
+            drawEmptyWidgetState(canvas, w, h, renderDensity, kind, isTranslucent, fonts)
+            return bitmap
+        }
+
         val effect = resolveActiveEffect(weather.hero)
 
-        val isTranslucent = style == WidgetBackgroundStyle.TRANSLUCENT
         if (!(kind == WidgetKind.LOCK_SCREEN && isTranslucent)) {
             drawCardBackground(
                 canvas = canvas,
@@ -113,6 +131,47 @@ object WeatherWidgetRenderer {
         }
 
         return bitmap
+    }
+
+    private fun drawEmptyWidgetState(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        density: Float,
+        kind: WidgetKind,
+        isTranslucent: Boolean,
+        fonts: WidgetTypefaces
+    ) {
+        if (kind == WidgetKind.LOCK_SCREEN) {
+            val dashPaint = buildTextPaint(
+                sp = 22f,
+                density = density,
+                color = SkyTextPrimary,
+                weight = fonts.sansMedium,
+                align = Paint.Align.CENTER,
+                isTranslucent = isTranslucent
+            )
+            canvas.drawText("—°", w * 0.5f, h * 0.5f + dashPaint.textSize * 0.34f, dashPaint)
+            return
+        }
+        val titlePaint = buildTextPaint(
+            sp = 15f,
+            density = density,
+            color = SkyTextPrimary,
+            weight = fonts.serifRegular,
+            align = Paint.Align.CENTER,
+            isTranslucent = isTranslucent
+        )
+        val subPaint = buildTextPaint(
+            sp = 11.5f,
+            density = density,
+            color = SkyTextSecondary,
+            weight = fonts.sansMedium,
+            align = Paint.Align.CENTER,
+            isTranslucent = isTranslucent
+        )
+        canvas.drawText("Almanac", w * 0.5f, h * 0.46f, titlePaint)
+        canvas.drawText("Tap to load weather", w * 0.5f, h * 0.46f + 18f * density, subPaint)
     }
 
     internal fun resolveLockScreenCanvasSizeDp(widthDp: Int, heightDp: Int): Pair<Int, Int> {

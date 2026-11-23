@@ -4,29 +4,21 @@ import com.google.weatherapp.BuildConfig
 import com.google.weatherapp.data.api.*
 import com.google.weatherapp.data.local.WeatherLocalDataSource
 import com.google.weatherapp.data.model.*
+import com.google.weatherapp.ui.LocationSearchState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
-import java.time.Instant
-import java.time.LocalDate
-import java.time.LocalDateTime
-import java.time.LocalTime
-import java.time.ZoneId
-import java.time.ZonedDateTime
-import java.time.format.DateTimeFormatter
-import java.time.format.TextStyle
-import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.roundToInt
 
 class WeatherRepository(
     private val apiService: GoogleWeatherApiService = ApiClient.weatherService,
     private val openMeteoService: OpenMeteoForecastService = ApiClient.openMeteoForecastService,
     private val airQualityService: OpenMeteoAirQualityService = ApiClient.openMeteoAirQualityService,
     private val geocodingService: OpenMeteoGeocodingService = ApiClient.openMeteoGeocodingService,
+    private val photonGeocodingService: PhotonGeocodingService = ApiClient.photonGeocodingService,
     private val sawsAlertClient: SawsAlertClient = SawsAlertClient(),
+    private val globalOfficialAlertClient: GlobalOfficialAlertClient = GlobalOfficialAlertClient(),
     private val apiKey: String = BuildConfig.GOOGLE_WEATHER_API_KEY,
     private val localDataSource: WeatherLocalDataSource? = null
 ) {
@@ -43,6 +35,16 @@ class WeatherRepository(
     fun getCachedWeatherData(latitude: Double? = null, longitude: Double? = null): WeatherDashboardData? =
         localDataSource?.getCachedWeather(latitude = latitude, longitude = longitude)
 
+    fun getCachedWeatherForLocation(
+        location: SavedLocation?,
+        gpsLatitude: Double? = null,
+        gpsLongitude: Double? = null
+    ): WeatherDashboardData? = localDataSource?.getCachedWeatherForLocation(
+        location = location,
+        gpsLatitude = gpsLatitude,
+        gpsLongitude = gpsLongitude
+    )
+
     fun getSavedLocations(): List<SavedLocation> = localDataSource?.getSavedLocations() ?: emptyList()
 
     fun saveLocations(locations: List<SavedLocation>) {
@@ -55,35 +57,103 @@ class WeatherRepository(
         localDataSource?.setSelectedCustomLocation(location)
     }
 
-    suspend fun searchCities(query: String): List<SavedLocation> = withContext(Dispatchers.IO) {
+    suspend fun searchCities(query: String): List<SavedLocation> {
+        return when (val state = searchPlaces(query)) {
+            is LocationSearchState.Results -> state.locations
+            else -> emptyList()
+        }
+    }
+
+    /**
+     * Global hybrid place search combining Open-Meteo Geocoding + OpenStreetMap Photon
+     * plus direct latitude/longitude coordinate lookup. Never fabricates results and
+     * distinguishes empty matches from network errors.
+     */
+    suspend fun searchPlaces(query: String): LocationSearchState = withContext(Dispatchers.IO) {
         val trimmed = query.trim()
-        if (trimmed.length < 2) return@withContext emptyList()
-        try {
-            val response = geocodingService.searchLocations(query = trimmed)
-            response.results.orEmpty().mapNotNull { item ->
-                val name = item.name ?: return@mapNotNull null
-                val lat = item.latitude ?: return@mapNotNull null
-                val lon = item.longitude ?: return@mapNotNull null
-                SavedLocation(
-                    name = name,
-                    adminArea = item.admin1.orEmpty(),
-                    country = item.country.orEmpty(),
-                    latitude = lat,
-                    longitude = lon,
-                    isCurrentGps = false
-                )
+        if (trimmed.length < 2) return@withContext LocationSearchState.Idle
+
+        // 1. Direct coordinate search (e.g. "-33.9249, 18.4241" or "35.68° N, 139.65° E")
+        LocationSearchEngine.parseCoordinateQuery(trimmed)?.let { (lat, lon) ->
+            val reverseProps = safeCall("Photon coordinate reverse") {
+                photonGeocodingService.reverseGeocode(latitude = lat, longitude = lon)
+                    .features?.firstOrNull()?.properties
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            android.util.Log.w(TAG, "City search failed", e)
-            emptyList()
+            val resolvedName = LocationSearchEngine.formatReverseGeocodeName(reverseProps)
+                ?: LocationSearchEngine.formatCoordinates(lat, lon)
+            val admin = listOfNotNull(
+                reverseProps?.state?.trim()?.takeIf { it.isNotBlank() && !it.equals(resolvedName, ignoreCase = true) }
+            ).firstOrNull().orEmpty()
+            val country = reverseProps?.country?.trim().orEmpty()
+            return@withContext LocationSearchState.Results(
+                listOf(
+                    SavedLocation(
+                        name = resolvedName,
+                        adminArea = admin,
+                        country = country,
+                        latitude = lat,
+                        longitude = lon,
+                        isCurrentGps = false,
+                        countryCode = reverseProps?.countryCode?.trim()?.uppercase()
+                    )
+                )
+            )
+        }
+
+        // 2. Parallel Open-Meteo + OpenStreetMap Photon global search
+        coroutineScope {
+            var omSucceeded = false
+            var photonSucceeded = false
+
+            val omDeferred = async {
+                try {
+                    val res = geocodingService.searchLocations(query = trimmed, count = 10)
+                    omSucceeded = true
+                    res.results.orEmpty()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w(TAG, "Open-Meteo geocoding failed: ${e.message}")
+                    emptyList()
+                }
+            }
+            val photonDeferred = async {
+                try {
+                    val res = photonGeocodingService.searchLocations(query = trimmed, limit = 10)
+                    photonSucceeded = true
+                    res.features.orEmpty()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w(TAG, "Photon geocoding failed: ${e.message}")
+                    emptyList()
+                }
+            }
+
+            val omResults = omDeferred.await()
+            val photonFeatures = photonDeferred.await()
+
+            if (!omSucceeded && !photonSucceeded) {
+                return@coroutineScope LocationSearchState.Error("Check your internet connection and try again.")
+            }
+
+            val merged = LocationSearchEngine.mergeAndRankSearchResults(
+                query = trimmed,
+                omResults = omResults,
+                photonFeatures = photonFeatures
+            )
+            if (merged.isEmpty()) {
+                LocationSearchState.Empty(trimmed)
+            } else {
+                LocationSearchState.Results(merged)
+            }
         }
     }
 
     internal fun resolveBestRegionalModels(latitude: Double, longitude: Double): String {
         // Open-Meteo's "best_match" dynamically resolves the best high-resolution regional
-        // model (HRRR in North America, ICON-D2 in Central Europe, AROME in Western Europe, ECMWF globally)
+        // model (HRRR in North America, ICON-D2 in Central Europe, AROME in Western Europe,
+        // UKV in UK, JMA MSM in Japan, MET Norway in Nordics, HRDPS in Canada, ECMWF globally)
         // while preserving standard non-suffixed JSON keys and full 10-day coverage.
         return "best_match"
     }
@@ -92,16 +162,22 @@ class WeatherRepository(
         latitude: Double,
         longitude: Double,
         resolvedLocationName: String? = null,
-        altitude: Double? = null
+        altitude: Double? = null,
+        fallbackTimezone: String? = null,
+        targetLocation: SavedLocation? = localDataSource?.getSelectedCustomLocation(),
+        updateActiveCacheSlot: Boolean = true
     ): WeatherDashboardData = withContext(Dispatchers.IO) {
         try {
             coroutineScope {
+                val hasGoogleKey = apiKey.isNotBlank()
                 val googleCurrentDeferred = async {
+                    if (!hasGoogleKey) return@async null
                     safeCall("Google currentConditions") {
                         apiService.getCurrentConditions(apiKey = apiKey, latitude = latitude, longitude = longitude)
                     }
                 }
                 val googleHourlyDeferred = async {
+                    if (!hasGoogleKey) return@async null
                     safeCall("Google hourly") {
                         apiService.getHourlyForecast(
                             apiKey = apiKey,
@@ -113,6 +189,7 @@ class WeatherRepository(
                     }
                 }
                 val googleDailyDeferred = async {
+                    if (!hasGoogleKey) return@async null
                     safeCall("Google daily") {
                         apiService.getDailyForecast(
                             apiKey = apiKey,
@@ -124,6 +201,7 @@ class WeatherRepository(
                     }
                 }
                 val googleAlertsDeferred = async {
+                    if (!hasGoogleKey) return@async null
                     safeCall("Google publicAlerts") {
                         apiService.getPublicAlerts(
                             apiKey = apiKey,
@@ -179,21 +257,37 @@ class WeatherRepository(
                         airQualityService.getAirQuality(latitude = latitude, longitude = longitude)
                     }
                 }
+                val preliminaryZone = WeatherMapper.parseZoneIdOrNull(fallbackTimezone)
+                val globalOfficialAlertsDeferred = async {
+                    safeCall("Global official alerts") {
+                        globalOfficialAlertClient.fetchAlertsForLocation(
+                            latitude = latitude,
+                            longitude = longitude,
+                            zoneId = preliminaryZone
+                        )
+                    } ?: emptyList()
+                }
 
                 val gCurrent = googleCurrentDeferred.await()
                 val gHourly = googleHourlyDeferred.await()
                 val gDaily = googleDailyDeferred.await()
                 val gAlerts = googleAlertsDeferred.await()
                 val sawsAlerts = sawsAlertsDeferred.await()
+                val globalOfficialAlerts = globalOfficialAlertsDeferred.await()
                 val omForecast = openMeteoDeferred.await()
                 val omConsensus = consensusDeferred.await()
                 val omAqi = airQualityDeferred.await()
 
+                val hasUsableGoogle = gCurrent?.temperature?.degrees != null &&
+                    !gDaily?.forecastDays.isNullOrEmpty()
+                val hasUsableOpenMeteo = omForecast != null &&
+                    (omForecast.current?.temperature2m != null || omForecast.hourly?.temperature2m?.any { it != null } == true)
+
                 val result = when {
-                    gCurrent != null && gDaily != null -> WeatherMapper.mapEnsembleDashboardData(
-                        current = gCurrent,
+                    hasUsableGoogle -> WeatherMapper.mapEnsembleDashboardData(
+                        current = gCurrent!!,
                         hourly = gHourly ?: HourlyForecastResponse(emptyList()),
-                        daily = gDaily,
+                        daily = gDaily!!,
                         omForecast = omForecast,
                         omAqi = omAqi,
                         resolvedLocationName = resolvedLocationName,
@@ -201,29 +295,41 @@ class WeatherRepository(
                         longitude = longitude,
                         omConsensus = omConsensus,
                         googleAlerts = gAlerts,
-                        sawsAlerts = sawsAlerts
+                        sawsAlerts = sawsAlerts,
+                        globalOfficialAlerts = globalOfficialAlerts,
+                        fallbackTimezone = fallbackTimezone
                     )
-                    omForecast != null -> WeatherMapper.mapOpenMeteoFallbackDashboardData(
-                        omForecast = omForecast,
+                    hasUsableOpenMeteo -> WeatherMapper.mapOpenMeteoFallbackDashboardData(
+                        omForecast = omForecast!!,
                         omAqi = omAqi,
                         resolvedLocationName = resolvedLocationName,
                         latitude = latitude,
                         longitude = longitude,
                         omConsensus = omConsensus,
                         googleAlerts = gAlerts,
-                        sawsAlerts = sawsAlerts
+                        sawsAlerts = sawsAlerts,
+                        globalOfficialAlerts = globalOfficialAlerts,
+                        fallbackTimezone = fallbackTimezone
                     )
-                    else -> throw IllegalStateException("Both Google Weather and Open-Meteo forecast feeds failed")
+                    else -> throw IllegalStateException("Weather sources unavailable for this location")
                 }
 
-                localDataSource?.saveWeather(result)
+                localDataSource?.saveWeather(
+                    data = result,
+                    targetLocation = targetLocation,
+                    updateActiveSlot = updateActiveCacheSlot
+                )
                 result
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             android.util.Log.e(TAG, "Failed to fetch weather telemetry", e)
-            localDataSource?.getCachedWeather(latitude = latitude, longitude = longitude) ?: throw e
+            localDataSource?.getCachedWeatherForLocation(
+                location = targetLocation,
+                gpsLatitude = latitude,
+                gpsLongitude = longitude
+            ) ?: throw e
         }
     }
 

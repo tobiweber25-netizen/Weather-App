@@ -755,12 +755,12 @@ class WeatherNotificationReliabilityProofTest {
     }
 
     @Test
-    fun testSingleDayCache_EveningOutlook_ComplementsTomorrowDataProperly() {
+    fun testSingleDayCache_EveningOutlook_RefusesToFabricateTomorrowData() {
         val context = FakeContext()
-        var capturedExpandedText = ""
+        var dispatched = false
         WeatherNotificationHelper.areNotificationsEnabledOverride = { true }
-        WeatherNotificationHelper.notificationDispatcherOverride = { _, _, _, _, _, expanded, _, _ ->
-            capturedExpandedText = expanded
+        WeatherNotificationHelper.notificationDispatcherOverride = { _, _, _, _, _, _, _, _ ->
+            dispatched = true
             true
         }
 
@@ -776,9 +776,8 @@ class WeatherNotificationReliabilityProofTest {
         )
 
         val result = WeatherNotificationHelper.showTomorrowWeatherNotification(context, singleDayData)
-        assertTrue(result)
-        assertTrue("Tomorrow details must be generated and non-empty", capturedExpandedText.isNotBlank())
-        assertTrue("Expanded text should have High / Low format", capturedExpandedText.contains("High:"))
+        assertFalse("Evening outlook must not fabricate fake tomorrow weather when missing", result)
+        assertFalse("No fabricated notification should be dispatched", dispatched)
     }
 
     @Test

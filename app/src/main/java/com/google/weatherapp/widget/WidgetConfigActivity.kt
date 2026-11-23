@@ -105,7 +105,8 @@ private fun WidgetConfigScreen(
             context = context,
             kind = kind,
             style = selectedStyle,
-            data = cachedData
+            data = cachedData,
+            useSampleWhenEmpty = true
         )
     }
 

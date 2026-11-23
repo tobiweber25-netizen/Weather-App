@@ -11,6 +11,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -31,8 +33,13 @@ import com.google.weatherapp.data.model.HeroWeather
 import com.google.weatherapp.data.model.HourlyItem
 import com.google.weatherapp.data.model.PrecipitationNowcast
 import com.google.weatherapp.data.model.SevereAlertInfo
+import com.google.weatherapp.data.repository.WeatherMapper
 import com.google.weatherapp.theme.*
 import kotlinx.coroutines.delay
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 private val sharedAiService = AiWeatherStoryService()
 
@@ -43,11 +50,47 @@ fun HeroWeatherSection(
     nowcast: PrecipitationNowcast? = null,
     telemetry: BentoTelemetry? = null,
     alert: SevereAlertInfo? = null,
+    locationTimezone: String? = null,
+    isCurrentGps: Boolean = true,
+    pageCount: Int = 1,
+    activePageIndex: Int = 0,
+    onSelectPageIndex: ((Int) -> Unit)? = null,
     onLocationClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val activeEffect = remember(hero) { com.google.weatherapp.ui.resolveActiveEffect(hero) }
     val partlyCloudy = remember(hero.conditionText) { isPartlyCloudyCondition(hero.conditionText) }
+
+    // Live ticking clock for remote locations (updates every 30s cleanly)
+    val remoteLocalTimeText by produceState<String?>(initialValue = null, key1 = locationTimezone, key2 = isCurrentGps) {
+        if (locationTimezone.isNullOrBlank()) {
+            value = null
+            return@produceState
+        }
+        val zone = WeatherMapper.parseZoneIdOrNull(locationTimezone)
+        if (zone == null) {
+            value = null
+            return@produceState
+        }
+        val formatter = DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
+        while (true) {
+            val now = Instant.now()
+            val locationOffset = zone.rules.getOffset(now)
+            val deviceOffset = ZoneId.systemDefault().rules.getOffset(now)
+            value = if (!isCurrentGps || locationOffset != deviceOffset) {
+                val localTime = now.atZone(zone)
+                val tzShort = try {
+                    localTime.format(DateTimeFormatter.ofPattern("zzz", Locale.getDefault()))
+                } catch (_: Exception) {
+                    locationOffset.id
+                }
+                "Local ${localTime.format(formatter)} $tzShort"
+            } else {
+                null
+            }
+            delay(30_000L)
+        }
+    }
 
     Box(
         modifier = modifier
@@ -74,8 +117,8 @@ fun HeroWeatherSection(
                     )
             ) {
                 Icon(
-                    imageVector = Icons.Default.LocationOn,
-                    contentDescription = "Current Location",
+                    imageVector = if (isCurrentGps) Icons.Default.MyLocation else Icons.Default.LocationOn,
+                    contentDescription = if (isCurrentGps) "Current Location" else "Saved Location",
                     tint = SunCoreGold,
                     modifier = Modifier.size(IconSizeTokens.Micro)
                 )
@@ -92,6 +135,69 @@ fun HeroWeatherSection(
                         tint = SkyTextSecondary,
                         modifier = Modifier.size(IconSizeTokens.Micro)
                     )
+                }
+            }
+
+            if (!remoteLocalTimeText.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(SpacingTokens.ExtraSmall))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Schedule,
+                        contentDescription = null,
+                        tint = SkyTextSecondary,
+                        modifier = Modifier.size(IconSizeTokens.Micro)
+                    )
+                    Text(
+                        text = remoteLocalTimeText!!,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = SkyTextSecondary
+                    )
+                }
+            }
+
+            // Subtle swipe page indicator dots (Page 0 = GPS arrow, Pages 1..N = saved places)
+            if (pageCount > 1) {
+                Spacer(modifier = Modifier.height(SpacingTokens.Small))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
+                ) {
+                    for (idx in 0 until pageCount) {
+                        val isActive = idx == activePageIndex
+                        if (idx == 0) {
+                            Icon(
+                                imageVector = Icons.Default.MyLocation,
+                                contentDescription = "Current Location page",
+                                tint = if (isActive) SunCoreGold else SkyTextMuted.copy(alpha = 0.55f),
+                                modifier = Modifier
+                                    .size(ComponentTokens.PageIndicatorGpsIconSize)
+                                    .then(
+                                        if (onSelectPageIndex != null) Modifier.clickable { onSelectPageIndex(0) }
+                                        else Modifier
+                                    )
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .width(
+                                        if (isActive) ComponentTokens.PageIndicatorActiveWidth
+                                        else ComponentTokens.PageIndicatorDotSize
+                                    )
+                                    .height(ComponentTokens.PageIndicatorDotSize)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (isActive) SkyTextPrimary else SkyTextMuted.copy(alpha = 0.45f)
+                                    )
+                                    .then(
+                                        if (onSelectPageIndex != null) Modifier.clickable { onSelectPageIndex(idx) }
+                                        else Modifier
+                                    )
+                            )
+                        }
+                    }
                 }
             }
 
@@ -336,17 +442,18 @@ private fun UnifiedPrecipitationNowcastCard(
     }
     val peakHour = upcomingHours.getOrNull(peakIndex)
 
+    val precipWord = (nowcast?.precipitationLabel ?: "Rain").lowercase()
     val badgeLabel = when {
         nowcast != null && nowcast.headlineLabel.isNotBlank() -> nowcast.headlineLabel
         nowcast != null && nowcast.isHighRes15Min -> "15-MIN RAIN NOWCAST"
-        else -> "SHORT-TERM RAIN FORECAST"
+        else -> "SHORT-TERM ${precipWord.uppercase()} FORECAST"
     }
     val summaryLabel = when {
         nowcast != null && nowcast.summaryText.isNotBlank() -> nowcast.summaryText
         upcomingHours.firstOrNull()?.let { it.rainProbability >= 45 || it.precipitationMm > 0.2 } == true ->
             "Precipitation active now · Continuing over next hours"
         peakHour != null ->
-            "Peak rain expected around ${peakHour.hourLabel} (${peakHour.rainProbability}% chance)"
+            "Peak $precipWord expected around ${peakHour.hourLabel} (${peakHour.rainProbability}% chance)"
         else ->
             "Light precipitation possible over the next 12 hours"
     }

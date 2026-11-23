@@ -125,8 +125,10 @@ fun BentoTelemetryGrid(
                 modifier = Modifier.weight(1f)
             )
 
+            val isPressureAvailable = telemetry.pressureHpa > 0
             val isStationPressure = telemetry.pressureLabel.contains("Station", ignoreCase = true)
             val pressureMood = when {
+                !isPressureAvailable -> "Sensor unavailable"
                 isStationPressure -> "Station pressure"
                 telemetry.pressureHpa < 1005 -> "Low pressure"
                 telemetry.pressureHpa > 1022 -> "High pressure"
@@ -135,13 +137,14 @@ fun BentoTelemetryGrid(
 
             BentoGlassTile(
                 title = "PRESSURE",
-                value = "${telemetry.pressureHpa} hPa",
+                value = if (isPressureAvailable) "${telemetry.pressureHpa} hPa" else "—",
                 subtitle = pressureMood,
                 icon = Icons.Default.Compress,
                 onClick = null,
                 gaugeContent = {
                     BarometerArcGauge(
                         pressureHpa = telemetry.pressureHpa,
+                        isAvailable = isPressureAvailable,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(ComponentTokens.BentoBarometerHeight)
@@ -252,21 +255,28 @@ fun BentoTelemetryGrid(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
         ) {
+            val isHumidityAvailable = telemetry.humidityPercent >= 0
+            val humiditySubtitle = when {
+                !isHumidityAvailable -> "Sensor unavailable"
+                telemetry.isDewPointUnavailable -> "Dew point —"
+                else -> "Dew point ${telemetry.dewPointDegrees}°"
+            }
             BentoGlassTile(
                 title = "HUMIDITY",
-                value = "${telemetry.humidityPercent}%",
-                subtitle = "Dew point ${telemetry.dewPointDegrees}°",
+                value = if (isHumidityAvailable) "${telemetry.humidityPercent}%" else "—",
+                subtitle = humiditySubtitle,
                 icon = Icons.Default.Opacity,
                 isExpanded = expandedMetric == TelemetryMetricType.HUMIDITY,
-                isExpandable = hourlyList.isNotEmpty(),
+                isExpandable = hourlyList.isNotEmpty() && isHumidityAvailable,
                 onClick = {
-                    if (hourlyList.isNotEmpty()) {
+                    if (hourlyList.isNotEmpty() && isHumidityAvailable) {
                         expandedMetric = if (expandedMetric == TelemetryMetricType.HUMIDITY) null else TelemetryMetricType.HUMIDITY
                     }
                 },
                 gaugeContent = {
                     HumidityGraduatedGauge(
                         humidityPercent = telemetry.humidityPercent,
+                        isAvailable = isHumidityAvailable,
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(ComponentTokens.BentoGaugeHeight)
@@ -277,16 +287,17 @@ fun BentoTelemetryGrid(
 
             val isAqiAvailable = telemetry.aqiCategory != "Unavailable" && telemetry.aqiCategory != "N/A"
             val aqiDisplay = if (isAqiAvailable) "${telemetry.aqiValue}" else "—"
+            val aqiScalePrefix = if (telemetry.aqiScaleLabel.contains("EU", ignoreCase = true)) "EU AQI" else "US AQI"
             val aqiSubtitle = when {
                 isAqiAvailable && telemetry.dominantPollutantLabel.isNotBlank() && telemetry.dominantPollutantLabel != "Air sensor active" ->
                     "${telemetry.aqiCategory} · ${telemetry.dominantPollutantLabel}"
-                isAqiAvailable && telemetry.pm25 > 0.0 -> "${telemetry.aqiCategory} · PM2.5 ${telemetry.pm25}"
-                isAqiAvailable -> telemetry.aqiCategory
+                isAqiAvailable && telemetry.pm25 > 0.0 -> "${telemetry.aqiCategory} ($aqiScalePrefix) · PM2.5 ${telemetry.pm25}"
+                isAqiAvailable -> "${telemetry.aqiCategory} · $aqiScalePrefix"
                 else -> "Sensor unavailable"
             }
 
             BentoGlassTile(
-                title = "AIR QUALITY",
+                title = if (isAqiAvailable) "AIR QUALITY · $aqiScalePrefix" else "AIR QUALITY",
                 value = aqiDisplay,
                 subtitle = aqiSubtitle,
                 icon = Icons.Default.Eco,
@@ -295,6 +306,7 @@ fun BentoTelemetryGrid(
                     AqiSpectrumMicroGauge(
                         aqiValue = telemetry.aqiValue,
                         isAvailable = isAqiAvailable,
+                        isEuropeanScale = telemetry.aqiScaleLabel.contains("EU", ignoreCase = true),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(ComponentTokens.BentoGaugeHeight)
@@ -330,10 +342,26 @@ private fun SolarHorizonFeatureCard(
     telemetry: BentoTelemetry,
     isDaytime: Boolean
 ) {
-    val primaryTitle = if (isDaytime) "DAYLIGHT ARC" else "NIGHT CYCLE"
-    val nextEventLabel = if (isDaytime) "Sunset ${telemetry.sunsetTime}" else "Sunrise ${telemetry.sunriseTime}"
-    val sunIcon = if (isDaytime) Icons.Default.WbSunny else Icons.Default.WbTwilight
-    val iconTint = if (isDaytime) SunCoreGold else MoonPearlCore
+    val statusOverride = telemetry.daylightStatusOverride
+    val isPolarDay = telemetry.sunriseTime == "24h Sun"
+    val isPolarNight = telemetry.sunsetTime == "24h Night"
+    val isSunUnavailable = telemetry.sunriseTime == "—" && telemetry.sunsetTime == "—"
+
+    val primaryTitle = when {
+        isPolarDay -> "MIDNIGHT SUN"
+        isPolarNight -> "POLAR NIGHT"
+        isDaytime -> "DAYLIGHT ARC"
+        else -> "NIGHT CYCLE"
+    }
+    val nextEventLabel = when {
+        isPolarDay -> "24h Daylight"
+        isPolarNight -> "24h Darkness"
+        isSunUnavailable -> "Times unavailable"
+        isDaytime -> "Sunset ${telemetry.sunsetTime}"
+        else -> "Sunrise ${telemetry.sunriseTime}"
+    }
+    val sunIcon = if (isDaytime || isPolarDay) Icons.Default.WbSunny else Icons.Default.WbTwilight
+    val iconTint = if (isDaytime || isPolarDay) SunCoreGold else MoonPearlCore
 
     Column(
         modifier = Modifier
@@ -404,6 +432,7 @@ private fun SolarHorizonFeatureCard(
             }
 
             val daylightStatus = when {
+                !statusOverride.isNullOrBlank() -> statusOverride
                 !isDaytime -> "Below horizon"
                 telemetry.sunProgress < 0.18f -> "Morning golden hour"
                 telemetry.sunProgress > 0.82f -> "Evening golden hour"
@@ -439,6 +468,7 @@ private fun SolarHorizonFeatureCard(
 private fun VisibilityComfortFeatureStrip(
     telemetry: BentoTelemetry
 ) {
+    val isVisibilityAvailable = telemetry.visibilityKm >= 0.0
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -475,12 +505,13 @@ private fun VisibilityComfortFeatureStrip(
                 horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
             ) {
                 Text(
-                    text = "${telemetry.visibilityKm} km",
+                    text = if (isVisibilityAvailable) "${telemetry.visibilityKm} km" else "—",
                     style = MaterialTheme.typography.headlineLarge,
                     fontWeight = FontWeight.SemiBold,
                     color = SkyTextPrimary
                 )
                 val clarityText = when {
+                    !isVisibilityAvailable -> "Sensor unavailable"
                     telemetry.visibilityKm >= 10.0 -> "Crystal clear"
                     telemetry.visibilityKm >= 5.0 -> "Good clarity"
                     telemetry.visibilityKm >= 2.0 -> "Light haze"
@@ -489,7 +520,7 @@ private fun VisibilityComfortFeatureStrip(
                 Text(
                     text = clarityText,
                     style = MaterialTheme.typography.labelMedium,
-                    color = TempBarMildColor,
+                    color = if (isVisibilityAvailable) TempBarMildColor else SkyTextMuted,
                     modifier = Modifier.padding(bottom = SpacingTokens.ExtraSmall)
                 )
             }
@@ -503,7 +534,8 @@ private fun VisibilityComfortFeatureStrip(
         }
 
         VisibilityClarityHorizonGraphic(
-            visibilityKm = telemetry.visibilityKm,
+            visibilityKm = if (isVisibilityAvailable) telemetry.visibilityKm else 0.0,
+            isAvailable = isVisibilityAvailable,
             modifier = Modifier.size(width = ComponentTokens.TempBarWidth, height = ComponentTokens.BentoGaugeHeight)
         )
     }
@@ -691,6 +723,7 @@ private fun ExpandedSparklineGlassCard(
 private fun AqiSpectrumMicroGauge(
     aqiValue: Int,
     isAvailable: Boolean = true,
+    isEuropeanScale: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -714,7 +747,8 @@ private fun AqiSpectrumMicroGauge(
             return@Canvas
         }
 
-        val ratio = (aqiValue / 200f).coerceIn(0f, 1f)
+        val scaleMax = if (isEuropeanScale) 100f else 200f
+        val ratio = (aqiValue / scaleMax).coerceIn(0f, 1f)
         segments.forEachIndexed { idx, col ->
             drawRoundRect(
                 color = col.copy(alpha = 0.85f),
@@ -857,6 +891,7 @@ private fun PrecipitationMiniHistogram(
 @Composable
 private fun HumidityGraduatedGauge(
     humidityPercent: Int,
+    isAvailable: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
@@ -885,6 +920,8 @@ private fun HumidityGraduatedGauge(
             cornerRadius = CornerRadius(barHeightPx, barHeightPx)
         )
 
+        if (!isAvailable) return@Canvas
+
         drawRoundRect(
             brush = Brush.horizontalGradient(
                 colors = listOf(TempBarCoolColor.copy(alpha = 0.55f), RainDropCyan)
@@ -906,9 +943,10 @@ private fun HumidityGraduatedGauge(
 @Composable
 private fun VisibilityClarityHorizonGraphic(
     visibilityKm: Double,
+    isAvailable: Boolean = true,
     modifier: Modifier = Modifier
 ) {
-    val clarityRatio = (visibilityKm.toFloat() / 16f).coerceIn(0.15f, 1f)
+    val clarityRatio = if (isAvailable) (visibilityKm.toFloat() / 16f).coerceIn(0.15f, 1f) else 0f
 
     Canvas(modifier = modifier) {
         val bands = 5
@@ -919,7 +957,7 @@ private fun VisibilityClarityHorizonGraphic(
             val bandW = size.width * widthFrac
             val startX = (size.width - bandW) * 0.5f
             val activeThreshold = (bands - 1 - i).toFloat() / bands
-            val isClearBand = clarityRatio >= activeThreshold
+            val isClearBand = isAvailable && clarityRatio >= activeThreshold
             val alpha = if (isClearBand) 0.28f + (i * 0.14f) else 0.12f
 
             drawLine(
@@ -1211,13 +1249,15 @@ private fun WindCompassGauge(
 @Composable
 private fun BarometerArcGauge(
     pressureHpa: Int,
+    isAvailable: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val density = LocalDensity.current
     val strokePx = with(density) { ComponentTokens.BentoGaugeStroke.toPx() }
 
     Canvas(modifier = modifier) {
-        val normalized = ((pressureHpa - 980f) / 60f).coerceIn(0.05f, 0.95f)
+        // Wide global range (960–1050 hPa) handles tropical cyclones and winter highs cleanly
+        val normalized = ((pressureHpa - 960f) / 90f).coerceIn(0.05f, 0.95f)
         val startAngle = 160f
         val sweepTotal = 220f
 
@@ -1254,6 +1294,8 @@ private fun BarometerArcGauge(
             size = arcSize,
             style = Stroke(width = strokePx, cap = StrokeCap.Round)
         )
+
+        if (!isAvailable) return@Canvas
 
         // Active luminous sweep arc
         drawArc(

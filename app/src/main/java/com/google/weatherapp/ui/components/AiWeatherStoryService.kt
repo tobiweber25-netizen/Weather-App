@@ -44,9 +44,10 @@ class AiWeatherStoryService {
                         appendLine("High/Low: ${hero.highDegrees}°C / ${hero.lowDegrees}°C")
                         appendLine("Is Daytime: ${hero.isDaytime}")
                         telemetry?.let { t ->
-                            appendLine("Wind: ${t.windSpeedKmH} km/h (gusts ${t.windGustKmH} km/h), Humidity: ${t.humidityPercent}%, UV: ${t.uvIndex} (${t.uvCategory})")
-                            if (t.precipitationMm > 0.0) appendLine("Expected 24h Rain: ${t.precipitationMm} mm")
-                            if (t.aqiCategory != "Unavailable") appendLine("Air Quality: ${t.aqiValue} (${t.aqiCategory})")
+                            val humPart = if (t.humidityPercent >= 0) ", Humidity: ${t.humidityPercent}%" else ""
+                            appendLine("Wind: ${t.windSpeedKmH} km/h (gusts ${t.windGustKmH} km/h)$humPart, UV: ${t.uvIndex} (${t.uvCategory})")
+                            if (t.precipitationMm > 0.0) appendLine("Expected 24h Precipitation: ${t.precipitationMm} mm")
+                            if (t.aqiCategory != "Unavailable") appendLine("Air Quality: ${t.aqiValue} ${t.aqiScaleLabel} (${t.aqiCategory})")
                         }
                         nowcast?.takeIf { it.isPrecipitationImminent }?.let { n ->
                             appendLine("Short-Term Rain Forecast: ${n.summaryText}")

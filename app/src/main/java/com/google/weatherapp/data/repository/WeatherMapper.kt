@@ -2,12 +2,14 @@ package com.google.weatherapp.data.repository
 
 import com.google.weatherapp.data.api.*
 import com.google.weatherapp.data.model.*
+import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
@@ -33,10 +35,18 @@ internal object WeatherMapper {
         longitude: Double = 0.0,
         omConsensus: WeatherConsensus.MultiModelConsensusData? = null,
         googleAlerts: PublicAlertsResponse? = null,
-        sawsAlerts: List<OfficialWeatherAlert> = emptyList()
+        sawsAlerts: List<OfficialWeatherAlert> = emptyList(),
+        globalOfficialAlerts: List<OfficialWeatherAlert> = emptyList(),
+        fallbackTimezone: String? = null
     ): WeatherDashboardData {
-        val timezoneId = current.timeZone?.id ?: omForecast?.timezone
-        val zoneId = resolveZoneId(timezoneId)
+        val zoneId = resolveBestZoneId(
+            current.timeZone?.id,
+            omForecast?.timezone,
+            fallbackTimezone,
+            hourly.forecastHours?.firstOrNull()?.displayDateTime?.utcOffset
+        )
+        val timezoneId = zoneId.id
+        val promotedModel = omConsensus?.promotedRegionalModelId
         val nowZoned = ZonedDateTime.now(zoneId)
         val currentLocalDateHour = nowZoned.toLocalDateTime().truncatedTo(ChronoUnit.HOURS)
         val currentLocalHour = nowZoned.hour
@@ -72,11 +82,17 @@ internal object WeatherMapper {
         val blendedCurrentTempDouble = WeatherConsensus.blendConsensusTemperature(
             googleTemp = gTemp,
             modelTemps = currentOmModels,
-            leadHours = 0
-        ) ?: gTemp ?: omTemp ?: 20.0
+            leadHours = 0,
+            promotedRegionalModelId = promotedModel
+        ) ?: gTemp ?: omTemp ?: omHourlyByDateHour[nowHourKey]?.temp
+            ?: throw IllegalStateException("No current temperature available for this location")
         val blendedCurrentTemp = blendedCurrentTempDouble.roundToInt()
 
-        val humidity = current.relativeHumidity ?: omForecast?.current?.relativeHumidity2m ?: 50
+        val rawHumidity = current.relativeHumidity
+            ?: omForecast?.current?.relativeHumidity2m
+            ?: omHourlyByDateHour[nowHourKey]?.humidity
+        val humidity = rawHumidity ?: -1
+        val effectiveHumidityForPhysics = rawHumidity ?: 50
         val windSpeed = current.wind?.speed?.value?.roundToInt()
             ?: omForecast?.current?.windSpeed10m?.roundToInt()
             ?: 0
@@ -87,11 +103,11 @@ internal object WeatherMapper {
             actualTempC = blendedCurrentTempDouble,
             googleFeelsC = gFeels,
             omFeelsC = omFeels,
-            humidityPercent = humidity,
+            humidityPercent = effectiveHumidityForPhysics,
             windKmH = windSpeed.toDouble(),
             isDaytime = isDay
         )
-        val feelsReason = buildFeelsLikeReason(blendedCurrentTemp, blendedFeelsTemp, humidity, windSpeed, isDay)
+        val feelsReason = buildFeelsLikeReason(blendedCurrentTemp, blendedFeelsTemp, effectiveHumidityForPhysics, windSpeed, isDay)
 
         val todayForecast = daily.forecastDays?.firstOrNull()
         val todayLocalDate = todayForecast?.displayDate?.let { parseDisplayDate(it, zoneId) }
@@ -151,9 +167,7 @@ internal object WeatherMapper {
             else -> "Cached Weather"
         }
 
-        val locationName = resolvedLocationName?.takeIf { it.isNotBlank() }
-            ?: timezoneId?.substringAfterLast("/")?.replace("_", " ")
-            ?: "Current Location"
+        val locationName = resolveHonestLocationName(resolvedLocationName, latitude, longitude)
 
         // Hourly forecast processing (24 hours, 1-hour aligned precipitation, calibrated consensus)
         val gHours = hourly.forecastHours.orEmpty()
@@ -171,9 +185,9 @@ internal object WeatherMapper {
             val built = mutableListOf<HourlyItem>()
             if (needsPrependedNow) {
                 val nowPop = current.precipitation?.probability?.percent
-                    ?: blendHourlyPop(null, currentHourPrecipSlot?.pop, currentHourConsensusPrecip?.popByModel, leadHours = 0)
-                val nowPrecipMm = current.precipitation?.qpf?.quantity
-                    ?: blendHourlyPrecipMm(null, currentHourPrecipSlot?.precipMm, currentHourConsensusPrecip?.precipByModel, leadHours = 0)
+                    ?: blendHourlyPop(null, currentHourPrecipSlot?.pop, currentHourConsensusPrecip?.popByModel, leadHours = 0, promotedModel = promotedModel)
+                val nowPrecipMm = extractGooglePrecipMm(current.precipitation)
+                    ?: blendHourlyPrecipMm(null, currentHourPrecipSlot?.precipMm, currentHourConsensusPrecip?.precipByModel, leadHours = 0, promotedModel = promotedModel)
                 val nowOmSlot = omHourlyByDateHour[nowHourKey]
                 val nowStormProb = maxOf(
                     current.thunderstormProbability ?: 0,
@@ -190,7 +204,7 @@ internal object WeatherMapper {
                         windSpeedKmH = windSpeed,
                         precipitationMm = roundOneDecimal(nowPrecipMm),
                         uvIndex = current.uvIndex ?: nowOmSlot?.uvIndex ?: 0,
-                        humidityPercent = humidity,
+                        humidityPercent = rawHumidity ?: 0,
                         thunderstormProbability = nowStormProb
                     )
                 )
@@ -226,13 +240,13 @@ internal object WeatherMapper {
                         blendedItem.copy(
                             tempDegrees = blendedCurrentTemp,
                             rainProbability = current.precipitation?.probability?.percent ?: blendedItem.rainProbability,
-                            precipitationMm = roundOneDecimal(current.precipitation?.qpf?.quantity ?: blendedItem.precipitationMm),
+                            precipitationMm = roundOneDecimal(extractGooglePrecipMm(current.precipitation) ?: blendedItem.precipitationMm),
                             conditionText = descText,
                             isDaytime = isDay,
                             iconUri = current.weatherCondition?.iconBaseUri,
                             windSpeedKmH = windSpeed,
                             uvIndex = current.uvIndex ?: blendedItem.uvIndex,
-                            humidityPercent = humidity,
+                            humidityPercent = rawHumidity ?: blendedItem.humidityPercent,
                             thunderstormProbability = maxOf(
                                 current.thunderstormProbability ?: 0,
                                 blendedItem.thunderstormProbability
@@ -261,13 +275,13 @@ internal object WeatherMapper {
                     item.copy(
                         tempDegrees = blendedCurrentTemp,
                         rainProbability = current.precipitation?.probability?.percent ?: item.rainProbability,
-                        precipitationMm = roundOneDecimal(current.precipitation?.qpf?.quantity ?: item.precipitationMm),
+                        precipitationMm = roundOneDecimal(extractGooglePrecipMm(current.precipitation) ?: item.precipitationMm),
                         conditionText = descText,
                         isDaytime = isDay,
                         iconUri = current.weatherCondition?.iconBaseUri,
                         windSpeedKmH = windSpeed,
                         uvIndex = current.uvIndex ?: item.uvIndex,
-                        humidityPercent = humidity,
+                        humidityPercent = rawHumidity ?: item.humidityPercent,
                         thunderstormProbability = maxOf(current.thunderstormProbability ?: 0, item.thunderstormProbability)
                     )
                 } else {
@@ -276,7 +290,7 @@ internal object WeatherMapper {
             }
         }
 
-        // Build Short-Term Rain Forecast (or native 15-min nowcast in Central Europe / North America)
+        // Build Short-Term Precipitation Forecast (or native 15-min nowcast in Central Europe / North America)
         val useNative15Min = WeatherConsensus.hasNative15MinNowcast(latitude, longitude)
         val nowcast = if (useNative15Min && omForecast?.minutely15 != null) {
             parsePrecipitationNowcast(omForecast.minutely15, zoneId)
@@ -285,11 +299,9 @@ internal object WeatherMapper {
             buildShortTermRainForecast(hourlyItems)
         }
 
-        // Merge official government alerts (Google Public Alerts + SAWS CAP)
+        // Merge official government alerts (Google Public Alerts + SAWS + US NWS + Canada ECCC)
         val parsedGoogleAlerts = parseGooglePublicAlerts(googleAlerts, zoneId)
-        val officialAlerts = (parsedGoogleAlerts + sawsAlerts)
-            .distinctBy { "${it.title.lowercase(Locale.US)}|${it.areaName.lowercase(Locale.US)}" }
-            .sortedByDescending { it.severity.ordinal }
+        val officialAlerts = mergeOfficialAlerts(parsedGoogleAlerts, sawsAlerts, globalOfficialAlerts)
 
         // Severe weather & thunderstorm risk pill calculation (24-hour storm scanner + official alerts)
         val next24Hours = futureGHours.take(24)
@@ -440,9 +452,9 @@ internal object WeatherMapper {
             val hourlyMax = dayHourly.maxOfOrNull { it.tempDegrees }
             val hourlyMin = dayHourly.minOfOrNull { it.tempDegrees }
 
-            val rawBlendedMax = WeatherConsensus.blendConsensusTemperature(gMax, maxModelMap, leadHoursMidday)?.roundToInt()
+            val rawBlendedMax = WeatherConsensus.blendConsensusTemperature(gMax, maxModelMap, leadHoursMidday, promotedModel)?.roundToInt()
                 ?: hourlyMax ?: rawHighTemp
-            val rawBlendedMin = WeatherConsensus.blendConsensusTemperature(gMin, minModelMap, leadHoursMidday + 12)?.roundToInt()
+            val rawBlendedMin = WeatherConsensus.blendConsensusTemperature(gMin, minModelMap, leadHoursMidday + 12, promotedModel)?.roundToInt()
                 ?: hourlyMin ?: rawLowTemp
 
             // Bound daily high accurately (including observed earlier-today high from Google history!)
@@ -487,8 +499,8 @@ internal object WeatherMapper {
                 if (omHourlyByDateHour.isEmpty()) omDailyPopFallback?.let { mapOf(WeatherConsensus.MODEL_BEST_MATCH to it) } ?: emptyMap() else emptyMap()
             }
 
-            val blendedDayPop = WeatherConsensus.blendConsensusRainProbability(gDayPop, dayPopModelMap, leadHoursMidday) ?: 0
-            val blendedNightPop = WeatherConsensus.blendConsensusRainProbability(gNightPop, nightPopModelMap, leadHoursMidday + 12) ?: 0
+            val blendedDayPop = WeatherConsensus.blendConsensusRainProbability(gDayPop, dayPopModelMap, leadHoursMidday, promotedModel) ?: 0
+            val blendedNightPop = WeatherConsensus.blendConsensusRainProbability(gNightPop, nightPopModelMap, leadHoursMidday + 12, promotedModel) ?: 0
 
             val relevantHourlyPop = if (idx == 0 && currentLocalHour >= 19) {
                 // Past daytime: focus Today's badge on remaining evening/tonight hours
@@ -503,17 +515,19 @@ internal object WeatherMapper {
                 maxOf(blendedDayPop, blendedNightPop, relevantHourlyPop)
             }
 
-            // Calibrated 24-hour rainfall total (07:00–07:00 aligned, weighted mean across models)
-            val hasGoogleQpf = dayPeriod?.precipitation?.qpf?.quantity != null || nightPeriod?.precipitation?.qpf?.quantity != null
+            // Calibrated 24-hour precipitation total (07:00–07:00 aligned, weighted mean across models)
+            val gDayOnlyQpf = extractGooglePrecipMm(dayPeriod?.precipitation)
+            val gNightOnlyQpf = extractGooglePrecipMm(nightPeriod?.precipitation)
+            val hasGoogleQpf = gDayOnlyQpf != null || gNightOnlyQpf != null
             val gDayQpf = if (hasGoogleQpf) {
-                (dayPeriod?.precipitation?.qpf?.quantity ?: 0.0) + (nightPeriod?.precipitation?.qpf?.quantity ?: 0.0)
+                (gDayOnlyQpf ?: 0.0) + (gNightOnlyQpf ?: 0.0)
             } else null
             val omWindowPrecipByModel = compute24hWindowPrecipByModel(localDate, omConsensus, omHourlyByDateHour)
             val omDailyPrecipFallback = omForecast?.daily?.precipitationSum?.getOrNull(omIdx)
             val precipModelMap = omWindowPrecipByModel.ifEmpty {
                 omDailyPrecipFallback?.let { mapOf(WeatherConsensus.MODEL_BEST_MATCH to it) } ?: emptyMap()
             }
-            val blendedPrecipAmount = WeatherConsensus.blendConsensusPrecipMm(gDayQpf, precipModelMap, leadHoursMidday) ?: 0.0
+            val blendedPrecipAmount = WeatherConsensus.blendConsensusPrecipMm(gDayQpf, precipModelMap, leadHoursMidday, promotedModel) ?: 0.0
             val sumHourlyPrecip = dayHourly.sumOf { it.precipitationMm }
             // When single-source (no Open-Meteo), still honor hourly QPF sum if Google daily under-reported it
             val finalPrecipAmount = roundOneDecimal(
@@ -544,18 +558,25 @@ internal object WeatherMapper {
                 dayHourly.maxOfOrNull { it.thunderstormProbability } ?: 0
             )
 
-            // Average day + night humidity and cloud cover (not daytime-only!)
-            val dayHumidity = listOfNotNull(dayPeriod?.relativeHumidity, nightPeriod?.relativeHumidity)
+            // Average day + night humidity and cloud cover (never substitute fake defaults!)
+            val omDayHumidities = (0..23).mapNotNull { h ->
+                omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", localDate, h)]?.humidity
+            }
+            val resolvedDayHumidity = listOfNotNull(dayPeriod?.relativeHumidity, nightPeriod?.relativeHumidity)
                 .takeIf { it.isNotEmpty() }?.average()?.roundToInt()
-                ?: dayHourly.takeIf { it.isNotEmpty() }?.map { it.humidityPercent }?.average()?.roundToInt()
-                ?: current.relativeHumidity
-                ?: 50
+                ?: omDayHumidities.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+                ?: dayHourly.map { it.humidityPercent }.filter { it > 0 }.takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+                ?: (if (idx == 0) rawHumidity else null)
+            val dayHumidity = resolvedDayHumidity ?: 0
+            val isDayHumidityUnavailable = resolvedDayHumidity == null
 
-            val cloudCover = listOfNotNull(dayPeriod?.cloudCover, nightPeriod?.cloudCover)
+            val resolvedCloudCover = listOfNotNull(dayPeriod?.cloudCover, nightPeriod?.cloudCover)
                 .takeIf { it.isNotEmpty() }?.average()?.roundToInt()
                 ?: (0..23).mapNotNull { h -> omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", localDate, h)]?.cloudCover }
                     .takeIf { it.isNotEmpty() }?.average()?.roundToInt()
-                ?: 0
+                ?: (if (idx == 0) current.cloudCover ?: omForecast?.current?.cloudCover else null)
+            val cloudCover = resolvedCloudCover ?: 0
+            val isCloudCoverUnavailable = resolvedCloudCover == null
 
             val daySunrise = day.sunEvents?.sunriseTime
                 ?: (if (idx == 0) current.sunEvents?.sunriseTime else null)
@@ -563,8 +584,18 @@ internal object WeatherMapper {
             val daySunset = day.sunEvents?.sunsetTime
                 ?: (if (idx == 0) current.sunEvents?.sunsetTime else null)
                 ?: omForecast?.daily?.sunset?.getOrNull(omIdx)
-            val sunriseStr = formatIsoTime(daySunrise, zoneId, fallback = "06:15")
-            val sunsetStr = formatIsoTime(daySunset, zoneId, fallback = "18:15")
+            val daySun = resolveSunTimes(
+                sunriseRaw = daySunrise,
+                sunsetRaw = daySunset,
+                zoneId = zoneId,
+                latitude = latitude,
+                isDaytimeHint = if (idx == 0) isDay else null,
+                dayHourlyIsDay = (0..23).mapNotNull { h ->
+                    omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", localDate, h)]?.isDay
+                }
+            )
+            val sunriseStr = daySun.sunriseLabel
+            val sunsetStr = daySun.sunsetLabel
 
             val dayCond = dayPeriod?.weatherCondition?.description?.text
                 ?: dayPeriod?.weatherCondition?.type?.replace("_", " ")?.lowercase()?.replaceFirstChar { it.uppercase() }
@@ -574,6 +605,13 @@ internal object WeatherMapper {
                 ?: nightPeriod?.weatherCondition?.type?.replace("_", " ")?.lowercase()?.replaceFirstChar { it.uppercase() }
                 ?: omForecast?.daily?.weatherCode?.getOrNull(omIdx)?.let { mapWmoCodeToCondition(it, false) }
                 ?: "Clear"
+
+            val precipTypeLabel = resolvePrecipitationType(
+                googleProbType = dayPeriod?.precipitation?.probability?.type ?: nightPeriod?.precipitation?.probability?.type,
+                conditionText = "$dayCond $nightCond",
+                wmoCode = omForecast?.daily?.weatherCode?.getOrNull(omIdx),
+                tempC = blendedMax.toDouble()
+            )
 
             val rawFeelsMax = blendTemperatures(
                 day.feelsLikeMaxTemperature?.degrees,
@@ -625,7 +663,10 @@ internal object WeatherMapper {
                 modelSpreadDegrees = dayDispersion.modelSpreadDegrees,
                 dayRainProbability = blendedDayPop,
                 nightRainProbability = blendedNightPop,
-                nightWind = nightWindStr
+                nightWind = nightWindStr,
+                isHumidityUnavailable = isDayHumidityUnavailable,
+                isCloudCoverUnavailable = isCloudCoverUnavailable,
+                precipitationType = precipTypeLabel
             )
         }
 
@@ -690,9 +731,11 @@ internal object WeatherMapper {
             ?: uvVal
         val uvCat = categorizeUv(uvVal)
 
-        val dewPoint = current.dewPoint?.degrees?.roundToInt()
+        val rawDewPoint = current.dewPoint?.degrees?.roundToInt()
             ?: omForecast?.current?.dewPoint2m?.roundToInt()
-            ?: WeatherConsensus.computeDewPoint(blendedCurrentTempDouble, humidity)
+            ?: rawHumidity?.let { WeatherConsensus.computeDewPoint(blendedCurrentTempDouble, it) }
+        val dewPoint = rawDewPoint ?: 0
+        val isDewPointUnavailable = rawDewPoint == null
 
         val (pressure, pressureLabel) = resolvePressureHpa(
             googleMsl = current.airPressure?.meanSeaLevelMillibars,
@@ -703,17 +746,20 @@ internal object WeatherMapper {
         )
 
         val sunEvents = todayForecast?.sunEvents ?: current.sunEvents
-        val sunriseStr = formatIsoTime(
-            sunEvents?.sunriseTime ?: omForecast?.daily?.sunrise?.getOrNull(todayOmIdx),
-            zoneId,
-            fallback = "06:15"
+        val todaySun = resolveSunTimes(
+            sunriseRaw = sunEvents?.sunriseTime ?: omForecast?.daily?.sunrise?.getOrNull(todayOmIdx),
+            sunsetRaw = sunEvents?.sunsetTime ?: omForecast?.daily?.sunset?.getOrNull(todayOmIdx),
+            zoneId = zoneId,
+            latitude = latitude,
+            isDaytimeHint = isDay,
+            dayHourlyIsDay = (0..23).mapNotNull { h ->
+                val dateForSun = todayLocalDate ?: LocalDate.now(zoneId)
+                omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", dateForSun, h)]?.isDay
+            }
         )
-        val sunsetStr = formatIsoTime(
-            sunEvents?.sunsetTime ?: omForecast?.daily?.sunset?.getOrNull(todayOmIdx),
-            zoneId,
-            fallback = "18:15"
-        )
-        val sunProgress = computeSolarProgress(sunriseStr, sunsetStr, zoneId)
+        val sunriseStr = todaySun.sunriseLabel
+        val sunsetStr = todaySun.sunsetLabel
+        val sunProgress = todaySun.solarProgress
 
         val aqiSummary = WeatherConsensus.resolveAirQuality(omAqi?.current)
         val visibilityKm = resolveVisibilityKm(current.visibility, currentOmHourSlot?.visibilityMeters)
@@ -741,7 +787,9 @@ internal object WeatherMapper {
             feelsLikeReason = feelsReason,
             dominantPollutantLabel = aqiSummary.dominantPollutantLabel,
             aqiScaleLabel = aqiSummary.scaleLabel,
-            pressureLabel = pressureLabel
+            pressureLabel = pressureLabel,
+            isDewPointUnavailable = isDewPointUnavailable,
+            daylightStatusOverride = todaySun.daylightStatusOverride
         )
 
         return WeatherDashboardData(
@@ -770,9 +818,13 @@ internal object WeatherMapper {
         longitude: Double = 0.0,
         omConsensus: WeatherConsensus.MultiModelConsensusData? = null,
         googleAlerts: PublicAlertsResponse? = null,
-        sawsAlerts: List<OfficialWeatherAlert> = emptyList()
+        sawsAlerts: List<OfficialWeatherAlert> = emptyList(),
+        globalOfficialAlerts: List<OfficialWeatherAlert> = emptyList(),
+        fallbackTimezone: String? = null
     ): WeatherDashboardData {
-        val zoneId = resolveZoneId(omForecast.timezone)
+        val zoneId = resolveBestZoneId(omForecast.timezone, fallbackTimezone)
+        val timezoneId = zoneId.id
+        val promotedModel = omConsensus?.promotedRegionalModelId
         val nowZoned = ZonedDateTime.now(zoneId)
         val currentLocalDateHour = nowZoned.toLocalDateTime().truncatedTo(ChronoUnit.HOURS)
         val currentLocalHour = nowZoned.hour
@@ -799,21 +851,26 @@ internal object WeatherMapper {
         val currentTempDouble = WeatherConsensus.blendConsensusTemperature(
             googleTemp = null,
             modelTemps = currentModelMap,
-            leadHours = 0
-        ) ?: omCurrent?.temperature2m ?: 22.0
+            leadHours = 0,
+            promotedRegionalModelId = promotedModel
+        ) ?: omCurrent?.temperature2m
+            ?: omHourlyByDateHour[nowHourKey]?.temp
+            ?: throw IllegalStateException("No current temperature available from Open-Meteo")
         val currentTemp = currentTempDouble.roundToInt()
 
-        val humidity = omCurrent?.relativeHumidity2m ?: 50
+        val rawHumidity = omCurrent?.relativeHumidity2m ?: omHourlyByDateHour[nowHourKey]?.humidity
+        val humidity = rawHumidity ?: -1
+        val effectiveHumidityForPhysics = rawHumidity ?: 50
         val windSpeed = omCurrent?.windSpeed10m?.roundToInt() ?: 0
         val feelsLike = WeatherConsensus.computeSanitizedFeelsLike(
             actualTempC = currentTempDouble,
             googleFeelsC = null,
             omFeelsC = omCurrent?.apparentTemperature,
-            humidityPercent = humidity,
+            humidityPercent = effectiveHumidityForPhysics,
             windKmH = windSpeed.toDouble(),
             isDaytime = isDay
         )
-        val feelsReason = buildFeelsLikeReason(currentTemp, feelsLike, humidity, windSpeed, isDay)
+        val feelsReason = buildFeelsLikeReason(currentTemp, feelsLike, effectiveHumidityForPhysics, windSpeed, isDay)
 
         val ensemble = WeatherConsensus.computeMultiModelDispersion(
             centerTemp = currentTemp,
@@ -824,9 +881,7 @@ internal object WeatherMapper {
 
         val rawHighTemp = omForecast.daily?.temperature2mMax?.firstOrNull()?.roundToInt() ?: currentTemp
         val rawLowTemp = omForecast.daily?.temperature2mMin?.firstOrNull()?.roundToInt() ?: currentTemp
-        val locationName = resolvedLocationName?.takeIf { it.isNotBlank() }
-            ?: omForecast.timezone?.substringAfterLast("/")?.replace("_", " ")
-            ?: "Current Location"
+        val locationName = resolveHonestLocationName(resolvedLocationName, latitude, longitude)
 
         val hourlyItems = extractNext24HoursFromOpenMeteo(omForecast, zoneId, omConsensus).mapIndexed { idx, item ->
             if (idx == 0) item.copy(tempDegrees = currentTemp) else item
@@ -861,8 +916,19 @@ internal object WeatherMapper {
             val fallbackWindSpeed = omForecast.daily?.windSpeed10mMax?.getOrNull(idx)?.roundToInt() ?: 0
             val fallbackWindDir = omForecast.daily?.windDirection10mDominant?.getOrNull(idx)?.let { degreesToCardinal(it) } ?: "—"
             val uvVal = omForecast.daily?.uvIndexMax?.getOrNull(idx)?.roundToInt() ?: 0
-            val sunriseStr = formatIsoTime(omForecast.daily?.sunrise?.getOrNull(idx), zoneId, "06:15")
-            val sunsetStr = formatIsoTime(omForecast.daily?.sunset?.getOrNull(idx), zoneId, "18:15")
+            val matchingSlots = (0..23).mapNotNull { h ->
+                omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", dateIso, h)]
+            }
+            val daySun = resolveSunTimes(
+                sunriseRaw = omForecast.daily?.sunrise?.getOrNull(idx),
+                sunsetRaw = omForecast.daily?.sunset?.getOrNull(idx),
+                zoneId = zoneId,
+                latitude = latitude,
+                isDaytimeHint = if (idx == 0) isDay else null,
+                dayHourlyIsDay = matchingSlots.map { it.isDay }
+            )
+            val sunriseStr = daySun.sunriseLabel
+            val sunsetStr = daySun.sunsetLabel
 
             val dayHours = (0..23).mapNotNull { h ->
                 val slotLdt = localDate.atTime(h, 0)
@@ -873,14 +939,14 @@ internal object WeatherMapper {
                 val cPrecip = lookupAlignedConsensusPrecip(slotLdt, omConsensus)
                 val alignedPrecipSlot = lookupAlignedPrecipSlot(slotLdt, omHourlyByDateHour)
                 val temp = if (!cTemp.isNullOrEmpty()) {
-                    WeatherConsensus.blendConsensusTemperature(null, cTemp, lead)?.roundToInt() ?: slot.temp.roundToInt()
+                    WeatherConsensus.blendConsensusTemperature(null, cTemp, lead, promotedModel)?.roundToInt()
+                        ?: slot.temp?.roundToInt()
                 } else {
-                    slot.temp.roundToInt()
-                }
-                val pop = blendHourlyPop(null, alignedPrecipSlot?.pop ?: slot.pop, cPrecip?.popByModel, lead)
-                val mm = blendHourlyPrecipMm(null, alignedPrecipSlot?.precipMm ?: slot.precipMm, cPrecip?.precipByModel, lead)
-                slot.toHourlyItem(String.format(Locale.getDefault(), "%02d:00", h)).copy(
-                    tempDegrees = temp,
+                    slot.temp?.roundToInt()
+                } ?: return@mapNotNull null
+                val pop = blendHourlyPop(null, alignedPrecipSlot?.pop ?: slot.pop, cPrecip?.popByModel, lead, promotedModel)
+                val mm = blendHourlyPrecipMm(null, alignedPrecipSlot?.precipMm ?: slot.precipMm, cPrecip?.precipByModel, lead, promotedModel)
+                slot.toHourlyItem(String.format(Locale.getDefault(), "%02d:00", h), temp).copy(
                     rainProbability = pop,
                     precipitationMm = roundOneDecimal(mm)
                 )
@@ -897,10 +963,10 @@ internal object WeatherMapper {
 
             val hourlyMax = dayHours.maxOfOrNull { it.tempDegrees }
             val hourlyMin = dayHours.minOfOrNull { it.tempDegrees }
-            val rawDayMax = WeatherConsensus.blendConsensusTemperature(null, windowHighs, leadMidday)?.roundToInt()
+            val rawDayMax = WeatherConsensus.blendConsensusTemperature(null, windowHighs, leadMidday, promotedModel)?.roundToInt()
                 ?: omForecast.daily?.temperature2mMax?.getOrNull(idx)?.roundToInt()
                 ?: hourlyMax ?: rawHighTemp
-            val rawDayMin = WeatherConsensus.blendConsensusTemperature(null, windowLows, leadMidday + 12)?.roundToInt()
+            val rawDayMin = WeatherConsensus.blendConsensusTemperature(null, windowLows, leadMidday + 12, promotedModel)?.roundToInt()
                 ?: omForecast.daily?.temperature2mMin?.getOrNull(idx)?.roundToInt()
                 ?: hourlyMin ?: rawLowTemp
 
@@ -917,29 +983,34 @@ internal object WeatherMapper {
             val dayPops = computeWindowMaxPopByModel(localDate, 7..18, omConsensus, omHourlyByDateHour)
             val nightPops = computeOvernightMaxPopByModel(localDate, omConsensus, omHourlyByDateHour)
             val rawDayPop = omForecast.daily?.precipitationProbabilityMax?.getOrNull(idx) ?: 0
-            val dayRainPop = WeatherConsensus.blendConsensusRainProbability(null, dayPops, leadMidday) ?: rawDayPop
-            val nightRainPop = WeatherConsensus.blendConsensusRainProbability(null, nightPops, leadMidday + 12) ?: rawDayPop
+            val dayRainPop = WeatherConsensus.blendConsensusRainProbability(null, dayPops, leadMidday, promotedModel) ?: rawDayPop
+            val nightRainPop = WeatherConsensus.blendConsensusRainProbability(null, nightPops, leadMidday + 12, promotedModel) ?: rawDayPop
             val maxHourlyPop = dayHours.maxOfOrNull { it.rainProbability } ?: 0
             val boundedDayPop = maxOf(dayRainPop, nightRainPop, maxHourlyPop)
 
             val windowPrecip = compute24hWindowPrecipByModel(localDate, omConsensus, omHourlyByDateHour)
-            val blendedPrecip = WeatherConsensus.blendConsensusPrecipMm(null, windowPrecip, leadMidday)
+            val blendedPrecip = WeatherConsensus.blendConsensusPrecipMm(null, windowPrecip, leadMidday, promotedModel)
                 ?: omForecast.daily?.precipitationSum?.getOrNull(idx)
                 ?: dayHours.sumOf { it.precipitationMm }
 
-            val avgHumidity = if (dayHours.isNotEmpty()) {
-                dayHours.map { it.humidityPercent }.average().roundToInt()
-            } else {
-                humidity
-            }
-            val matchingSlots = (0..23).mapNotNull { h ->
-                omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", dateIso, h)]
-            }
-            val avgCloudCover = if (matchingSlots.isNotEmpty()) {
-                matchingSlots.map { it.cloudCover }.average().roundToInt()
-            } else {
-                omCurrent?.cloudCover ?: 20
-            }
+            val resolvedDayHumidity = matchingSlots.mapNotNull { it.humidity }
+                .takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+                ?: (if (idx == 0) rawHumidity else null)
+            val avgHumidity = resolvedDayHumidity ?: 0
+            val isDayHumidityUnavailable = resolvedDayHumidity == null
+
+            val resolvedCloudCover = matchingSlots.mapNotNull { it.cloudCover }
+                .takeIf { it.isNotEmpty() }?.average()?.roundToInt()
+                ?: (if (idx == 0) omCurrent?.cloudCover else null)
+            val avgCloudCover = resolvedCloudCover ?: 0
+            val isDayCloudUnavailable = resolvedCloudCover == null
+
+            val precipTypeLabel = resolvePrecipitationType(
+                googleProbType = null,
+                conditionText = dCond,
+                wmoCode = dCode,
+                tempC = dayMax.toDouble()
+            )
 
             val dayDispersion = WeatherConsensus.computeMultiModelDispersion(
                 centerTemp = dayMax,
@@ -980,7 +1051,10 @@ internal object WeatherMapper {
                 modelSpreadDegrees = dayDispersion.modelSpreadDegrees,
                 dayRainProbability = dayRainPop,
                 nightRainProbability = nightRainPop,
-                nightWind = formatPeriodWind("Night", nightWind.first, nightWind.second)
+                nightWind = formatPeriodWind("Night", nightWind.first, nightWind.second),
+                isHumidityUnavailable = isDayHumidityUnavailable,
+                isCloudCoverUnavailable = isDayCloudUnavailable,
+                precipitationType = precipTypeLabel
             )
         }
 
@@ -1022,8 +1096,18 @@ internal object WeatherMapper {
             modelCount = fallbackModelCount
         )
 
-        val sunriseToday = dailyItems.firstOrNull()?.sunriseTime ?: "06:15"
-        val sunsetToday = dailyItems.firstOrNull()?.sunsetTime ?: "18:15"
+        val todaySun = resolveSunTimes(
+            sunriseRaw = omForecast.daily?.sunrise?.firstOrNull(),
+            sunsetRaw = omForecast.daily?.sunset?.firstOrNull(),
+            zoneId = zoneId,
+            latitude = latitude,
+            isDaytimeHint = isDay,
+            dayHourlyIsDay = (0..23).mapNotNull { h ->
+                omHourlyByDateHour[String.format(Locale.US, "%sT%02d:00", LocalDate.now(zoneId), h)]?.isDay
+            }
+        )
+        val sunriseToday = todaySun.sunriseLabel
+        val sunsetToday = todaySun.sunsetLabel
         val aqiSummary = WeatherConsensus.resolveAirQuality(omAqi?.current)
         val omWindDeg = omCurrent?.windDirection10m ?: 0
         val omWindDir = degreesToCardinal(omWindDeg)
@@ -1036,9 +1120,7 @@ internal object WeatherMapper {
         } else {
             currentOmHourSlot?.uvIndex ?: dailyItems.firstOrNull()?.uvIndex ?: 0
         }
-        val currentVisibilityKm = roundOneDecimal(
-            (currentOmHourSlot?.visibilityMeters ?: 10000.0) / 1000.0
-        )
+        val currentVisibilityKm = currentOmHourSlot?.visibilityMeters?.let { roundOneDecimal(it / 1000.0) } ?: -1.0
         val (pressure, pressureLabel) = resolvePressureHpa(
             googleMsl = null,
             omMsl = omCurrent?.pressureMsl,
@@ -1046,8 +1128,10 @@ internal object WeatherMapper {
             elevationMeters = omForecast.elevation,
             tempC = currentTempDouble
         )
-        val dewPoint = omCurrent?.dewPoint2m?.roundToInt()
-            ?: WeatherConsensus.computeDewPoint(currentTempDouble, humidity)
+        val rawDewPoint = omCurrent?.dewPoint2m?.roundToInt()
+            ?: rawHumidity?.let { WeatherConsensus.computeDewPoint(currentTempDouble, it) }
+        val dewPoint = rawDewPoint ?: 0
+        val isDewPointUnavailable = rawDewPoint == null
 
         val telemetry = BentoTelemetry(
             windSpeedKmH = windSpeed,
@@ -1067,18 +1151,18 @@ internal object WeatherMapper {
             aqiCategory = aqiSummary.category,
             pm25 = aqiSummary.pm25,
             visibilityKm = currentVisibilityKm,
-            sunProgress = computeSolarProgress(sunriseToday, sunsetToday, zoneId),
+            sunProgress = todaySun.solarProgress,
             feelsLikeDegrees = feelsLike,
             feelsLikeReason = feelsReason,
             dominantPollutantLabel = aqiSummary.dominantPollutantLabel,
             aqiScaleLabel = aqiSummary.scaleLabel,
-            pressureLabel = pressureLabel
+            pressureLabel = pressureLabel,
+            isDewPointUnavailable = isDewPointUnavailable,
+            daylightStatusOverride = todaySun.daylightStatusOverride
         )
 
         val parsedGoogleAlerts = parseGooglePublicAlerts(googleAlerts, zoneId)
-        val officialAlerts = (parsedGoogleAlerts + sawsAlerts)
-            .distinctBy { "${it.title.lowercase(Locale.US)}|${it.areaName.lowercase(Locale.US)}" }
-            .sortedByDescending { it.severity.ordinal }
+        val officialAlerts = mergeOfficialAlerts(parsedGoogleAlerts, sawsAlerts, globalOfficialAlerts)
 
         val hourlyStormList = hourlyItems.map { it.thunderstormProbability }
         val currentStormProb = if (wmoCode in 95..99) 70 else 0
@@ -1105,7 +1189,7 @@ internal object WeatherMapper {
             telemetry = telemetry,
             nowcast = nowcast,
             ensemble = ensemble,
-            timezone = omForecast.timezone,
+            timezone = timezoneId,
             latitude = latitude,
             longitude = longitude
         )
@@ -1308,11 +1392,30 @@ internal object WeatherMapper {
                 .ifBlank { item.eventType?.replace("_", " ")?.lowercase()?.replaceFirstChar { it.uppercase() }.orEmpty() }
                 .ifBlank { "Weather Alert" }
 
-            val severity = when (item.severity?.trim()?.uppercase(Locale.US)) {
+            val sourceName = item.dataSource?.name?.trim()?.takeIf { it.isNotBlank() }
+                ?: item.dataSource?.publisher?.replace("_", " ")?.trim()?.takeIf { it.isNotBlank() }
+                ?: "Official Alert"
+
+            val combinedInstructions = buildList {
+                item.instruction.orEmpty().map { it.trim() }.filter { it.isNotBlank() }.forEach { add(it) }
+                item.safetyRecommendations.orEmpty().forEach { rec ->
+                    val text = listOfNotNull(
+                        rec.directive?.trim()?.takeIf { it.isNotBlank() },
+                        rec.subtext?.trim()?.takeIf { it.isNotBlank() }
+                    ).joinToString(": ")
+                    if (text.isNotBlank()) add(text)
+                }
+            }.distinct().joinToString(" ")
+
+            val mappedSeverity = when (item.severity?.trim()?.uppercase(Locale.US)) {
                 "EXTREME", "SEVERE" -> SeverityRiskLevel.SEVERE
                 "MODERATE" -> SeverityRiskLevel.HIGH
                 "MINOR" -> SeverityRiskLevel.MODERATE
-                else -> SeverityRiskLevel.LOW
+                else -> when {
+                    title.contains("Warning", ignoreCase = true) -> SeverityRiskLevel.HIGH
+                    title.contains("Watch", ignoreCase = true) -> SeverityRiskLevel.MODERATE
+                    else -> SeverityRiskLevel.LOW
+                }
             }
             val expiresLabel = expInstant?.let {
                 DateTimeFormatter.ofPattern("EEE HH:mm", Locale.getDefault())
@@ -1322,38 +1425,51 @@ internal object WeatherMapper {
 
             OfficialWeatherAlert(
                 title = title,
-                severity = severity,
+                severity = mappedSeverity,
                 eventType = item.eventType.orEmpty(),
-                source = "Official Alert",
+                source = sourceName,
                 areaName = item.areaName.orEmpty(),
                 description = item.description.orEmpty().trim(),
-                instruction = item.instruction.orEmpty().filter { it.isNotBlank() }.joinToString(" "),
+                instruction = combinedInstructions,
                 expiresLabel = expiresLabel,
                 severityLabel = item.severity?.lowercase()?.replaceFirstChar { it.uppercase() }.orEmpty()
             )
         }
     }
 
+    internal fun mergeOfficialAlerts(
+        vararg lists: List<OfficialWeatherAlert>
+    ): List<OfficialWeatherAlert> {
+        return lists.flatMap { it }
+            .distinctBy { alert ->
+                val normTitle = alert.title.lowercase(Locale.US).replace(Regex("[^a-z0-9]"), "")
+                val normEvent = alert.eventType.lowercase(Locale.US).replace(Regex("[^a-z0-9]"), "")
+                normTitle.ifBlank { normEvent }
+            }
+            .sortedByDescending { it.severity.ordinal }
+    }
+
     private data class OmHourSlot(
-        val temp: Double,
+        val temp: Double?,
         val pop: Int,
         val precipMm: Double,
         val windSpeed: Int,
         val windDirection: String,
         val windGusts: Int,
         val uvIndex: Int,
-        val humidity: Int,
+        val humidity: Int?,
         val isDay: Boolean,
         val conditionText: String,
         val stormProb: Int,
         val visibilityMeters: Double? = null,
-        val cloudCover: Int = 20,
+        val cloudCover: Int? = null,
         val dewPoint: Double? = null,
-        val cape: Double? = null
+        val cape: Double? = null,
+        val weatherCode: Int? = null
     ) {
-        fun toHourlyItem(label: String): HourlyItem = HourlyItem(
+        fun toHourlyItem(label: String, resolvedTemp: Int): HourlyItem = HourlyItem(
             hourLabel = label,
-            tempDegrees = temp.roundToInt(),
+            tempDegrees = resolvedTemp,
             rainProbability = pop,
             iconUri = null,
             isDaytime = isDay,
@@ -1361,7 +1477,7 @@ internal object WeatherMapper {
             windSpeedKmH = windSpeed,
             precipitationMm = roundOneDecimal(precipMm),
             uvIndex = uvIndex,
-            humidityPercent = humidity,
+            humidityPercent = humidity ?: 0,
             thunderstormProbability = stormProb
         )
     }
@@ -1374,22 +1490,27 @@ internal object WeatherMapper {
             // Preserve the first occurrence on DST fall-back duplicate clock hours
             if (result.containsKey(tStr)) continue
 
+            // Keep null temp as null (never fabricate 20°C) while still preserving UV/visibility/precip slots
+            val rawTemp = hourly.temperature2m?.getOrNull(i)
             val isDay = (hourly.isDay?.getOrNull(i) ?: 1) == 1
-            val code = hourly.weatherCode?.getOrNull(i) ?: 0
+            val rawCode = hourly.weatherCode?.getOrNull(i)
+            val code = rawCode ?: 0
             val pop = hourly.precipitationProbability?.getOrNull(i) ?: 0
             val precip = hourly.precipitation?.getOrNull(i) ?: 0.0
             val windSpd = hourly.windSpeed10m?.getOrNull(i)?.roundToInt() ?: 0
             val windDir = hourly.windDirection10m?.getOrNull(i)?.let { degreesToCardinal(it) } ?: "—"
             val gusts = hourly.windGusts10m?.getOrNull(i)?.roundToInt() ?: windSpd
             val cape = hourly.cape?.getOrNull(i)
-            val cloud = hourly.cloudCover?.getOrNull(i) ?: when (code) {
-                0 -> 0
-                1 -> 20
-                2 -> 50
-                3 -> 95
-                45, 48 -> 90
-                in 51..99 -> 85
-                else -> 20
+            val cloud = hourly.cloudCover?.getOrNull(i) ?: rawCode?.let { wmo ->
+                when (wmo) {
+                    0 -> 0
+                    1 -> 20
+                    2 -> 50
+                    3 -> 95
+                    45, 48 -> 90
+                    in 51..99 -> 85
+                    else -> null
+                }
             }
             val stormProb = when {
                 code in 95..99 -> maxOf(pop, 60)
@@ -1399,21 +1520,22 @@ internal object WeatherMapper {
                 else -> 0
             }
             result[tStr] = OmHourSlot(
-                temp = hourly.temperature2m?.getOrNull(i) ?: 20.0,
+                temp = rawTemp,
                 pop = pop,
                 precipMm = precip,
                 windSpeed = windSpd,
                 windDirection = windDir,
                 windGusts = gusts,
                 uvIndex = hourly.uvIndex?.getOrNull(i)?.roundToInt() ?: 0,
-                humidity = hourly.relativeHumidity2m?.getOrNull(i) ?: 50,
+                humidity = hourly.relativeHumidity2m?.getOrNull(i),
                 isDay = isDay,
                 conditionText = mapWmoCodeToCondition(code, isDay),
                 stormProb = stormProb,
                 visibilityMeters = hourly.visibility?.getOrNull(i),
                 cloudCover = cloud,
                 dewPoint = hourly.dewPoint2m?.getOrNull(i),
-                cape = cape
+                cape = cape,
+                weatherCode = rawCode
             )
         }
         return result
@@ -1459,13 +1581,15 @@ internal object WeatherMapper {
         val consensusExact = exactKey?.let { omConsensus?.hourlyByTime?.get(it) }
         val consensusPrecip = lookupAlignedConsensusPrecip(slotDateTime, omConsensus)
 
+        val promotedModel = omConsensus?.promotedRegionalModelId
         val tempModels = consensusExact?.tempsByModel?.takeIf { it.isNotEmpty() }
             ?: omExact?.temp?.let { mapOf(WeatherConsensus.MODEL_BEST_MATCH to it) }
             ?: emptyMap()
         val hTemp = WeatherConsensus.blendConsensusTemperature(
             googleTemp = gItem.temperature?.degrees,
             modelTemps = tempModels,
-            leadHours = leadHours
+            leadHours = leadHours,
+            promotedRegionalModelId = promotedModel
         )?.roundToInt() ?: fallbackTemp
 
         val gPop = gItem.precipitation?.probability?.percent
@@ -1473,15 +1597,17 @@ internal object WeatherMapper {
             googlePop = gPop,
             omPop = omPrecipSlot?.pop,
             consensusPops = consensusPrecip?.popByModel,
-            leadHours = leadHours
+            leadHours = leadHours,
+            promotedModel = promotedModel
         )
 
-        val gPrecip = gItem.precipitation?.qpf?.quantity
+        val gPrecip = extractGooglePrecipMm(gItem.precipitation)
         val hPrecipMm = blendHourlyPrecipMm(
             googlePrecip = gPrecip,
             omPrecip = omPrecipSlot?.precipMm,
             consensusPrecips = consensusPrecip?.precipByModel,
-            leadHours = leadHours
+            leadHours = leadHours,
+            promotedModel = promotedModel
         )
 
         val hourConditionText = gItem.weatherCondition?.description?.text
@@ -1524,24 +1650,26 @@ internal object WeatherMapper {
         googlePop: Int?,
         omPop: Int?,
         consensusPops: Map<String, Int>?,
-        leadHours: Int
+        leadHours: Int,
+        promotedModel: String? = null
     ): Int {
         val modelMap = consensusPops?.takeIf { it.isNotEmpty() }
             ?: omPop?.let { mapOf(WeatherConsensus.MODEL_BEST_MATCH to it) }
             ?: emptyMap()
-        return WeatherConsensus.blendConsensusRainProbability(googlePop, modelMap, leadHours) ?: 0
+        return WeatherConsensus.blendConsensusRainProbability(googlePop, modelMap, leadHours, promotedModel) ?: 0
     }
 
     private fun blendHourlyPrecipMm(
         googlePrecip: Double?,
         omPrecip: Double?,
         consensusPrecips: Map<String, Double>?,
-        leadHours: Int
+        leadHours: Int,
+        promotedModel: String? = null
     ): Double {
         val modelMap = consensusPrecips?.takeIf { it.isNotEmpty() }
             ?: omPrecip?.let { mapOf(WeatherConsensus.MODEL_BEST_MATCH to it) }
             ?: emptyMap()
-        return WeatherConsensus.blendConsensusPrecipMm(googlePrecip, modelMap, leadHours) ?: 0.0
+        return WeatherConsensus.blendConsensusPrecipMm(googlePrecip, modelMap, leadHours, promotedModel) ?: 0.0
     }
 
     private fun buildCurrentModelMap(
@@ -1745,7 +1873,7 @@ internal object WeatherMapper {
                 omSurface.roundToInt() to "hPa • Station"
             }
         }
-        return 1013 to "hPa • Sea level"
+        return 0 to "Unavailable"
     }
 
     private fun resolveVisibilityKm(googleVis: Visibility?, omVisMeters: Double?): Double {
@@ -1758,7 +1886,7 @@ internal object WeatherMapper {
             return roundOneDecimal(km)
         }
         if (omVisMeters != null) return roundOneDecimal(omVisMeters / 1000.0)
-        return 10.0
+        return -1.0
     }
 
     private fun extractNext24HoursFromOpenMeteo(
@@ -1776,6 +1904,7 @@ internal object WeatherMapper {
             times.indexOfFirst { it.startsWith(todayPrefix) }.takeIf { it >= 0 } ?: return emptyList()
         }
         val map = parseOpenMeteoHourlyMap(hourly)
+        val promotedModel = omConsensus?.promotedRegionalModelId
 
         return (0 until 24).mapNotNull { offset ->
             val tStr = times.getOrNull(startIndex + offset) ?: return@mapNotNull null
@@ -1786,15 +1915,14 @@ internal object WeatherMapper {
             val cPrecip = lookupAlignedConsensusPrecip(slotLdt, omConsensus)
             val alignedPrecip = lookupAlignedPrecipSlot(slotLdt, map)
             val temp = if (cExact != null && cExact.tempsByModel.isNotEmpty()) {
-                WeatherConsensus.blendConsensusTemperature(null, cExact.tempsByModel, offset)?.roundToInt()
-                    ?: slot.temp.roundToInt()
+                WeatherConsensus.blendConsensusTemperature(null, cExact.tempsByModel, offset, promotedModel)?.roundToInt()
+                    ?: slot.temp?.roundToInt()
             } else {
-                slot.temp.roundToInt()
-            }
-            val pop = blendHourlyPop(null, alignedPrecip?.pop ?: slot.pop, cPrecip?.popByModel, offset)
-            val mm = blendHourlyPrecipMm(null, alignedPrecip?.precipMm ?: slot.precipMm, cPrecip?.precipByModel, offset)
-            slot.toHourlyItem(label).copy(
-                tempDegrees = temp,
+                slot.temp?.roundToInt()
+            } ?: return@mapNotNull null
+            val pop = blendHourlyPop(null, alignedPrecip?.pop ?: slot.pop, cPrecip?.popByModel, offset, promotedModel)
+            val mm = blendHourlyPrecipMm(null, alignedPrecip?.precipMm ?: slot.precipMm, cPrecip?.precipByModel, offset, promotedModel)
+            slot.toHourlyItem(label, temp).copy(
                 rainProbability = pop,
                 precipitationMm = roundOneDecimal(mm)
             )
@@ -1848,19 +1976,19 @@ internal object WeatherMapper {
                     fallbackCondition = if ((gItem.precipitation?.probability?.percent ?: 0) > 30) "Scattered Showers" else "Clear"
                 )
             } else if (omSlot != null) {
+                val promotedModel = omConsensus?.promotedRegionalModelId
                 val cExact = omConsensus?.hourlyByTime?.get(key)
                 val cPrecip = lookupAlignedConsensusPrecip(slotLdt, omConsensus)
                 val alignedPrecip = lookupAlignedPrecipSlot(slotLdt, omHourlyByDateHour)
                 val temp = if (cExact != null && cExact.tempsByModel.isNotEmpty()) {
-                    WeatherConsensus.blendConsensusTemperature(null, cExact.tempsByModel, leadHours)?.roundToInt()
-                        ?: omSlot.temp.roundToInt()
+                    WeatherConsensus.blendConsensusTemperature(null, cExact.tempsByModel, leadHours, promotedModel)?.roundToInt()
+                        ?: omSlot.temp?.roundToInt()
                 } else {
-                    omSlot.temp.roundToInt()
-                }
-                val pop = blendHourlyPop(null, alignedPrecip?.pop ?: omSlot.pop, cPrecip?.popByModel, leadHours)
-                val mm = blendHourlyPrecipMm(null, alignedPrecip?.precipMm ?: omSlot.precipMm, cPrecip?.precipByModel, leadHours)
-                omSlot.toHourlyItem(hStr).copy(
-                    tempDegrees = temp,
+                    omSlot.temp?.roundToInt()
+                } ?: return@mapNotNull null
+                val pop = blendHourlyPop(null, alignedPrecip?.pop ?: omSlot.pop, cPrecip?.popByModel, leadHours, promotedModel)
+                val mm = blendHourlyPrecipMm(null, alignedPrecip?.precipMm ?: omSlot.precipMm, cPrecip?.precipByModel, leadHours, promotedModel)
+                omSlot.toHourlyItem(hStr, temp).copy(
                     rainProbability = pop,
                     precipitationMm = roundOneDecimal(mm)
                 )
@@ -1877,8 +2005,9 @@ internal object WeatherMapper {
     }
 
     /**
-     * Honest Short-Term Rain Forecast derived from aligned multi-model hourly consensus
+     * Honest Short-Term Precipitation Forecast derived from aligned multi-model hourly consensus
      * for regions without native 15-minute weather models (e.g. South Africa, UK, Asia, Australia).
+     * Automatically adapts wording for snow and freezing precipitation in cold climates.
      */
     internal fun buildShortTermRainForecast(hourlyItems: List<HourlyItem>): PrecipitationNowcast? {
         if (hourlyItems.isEmpty()) return null
@@ -1887,13 +2016,38 @@ internal object WeatherMapper {
         val activeNow = nowItem.precipitationMm >= 0.2 || (nowItem.rainProbability >= 60 && nowItem.precipitationMm >= 0.1)
         val maxRate = window.maxOfOrNull { it.precipitationMm } ?: 0.0
 
+        val snowLike = window.any { h ->
+            val c = h.conditionText.lowercase(Locale.US)
+            c.contains("snow") || c.contains("blizzard") || c.contains("flurr") || c.contains("sleet") ||
+                ((h.precipitationMm >= 0.1 || h.rainProbability >= 45) && h.tempDegrees <= 0)
+        }
+        val freezingRainLike = !snowLike && window.any { h ->
+            h.conditionText.contains("freezing", ignoreCase = true)
+        }
+        val precipWord = when {
+            snowLike -> "Snow"
+            freezingRainLike -> "Freezing rain"
+            else -> "Rain"
+        }
+        val headline = when {
+            snowLike -> "SHORT-TERM SNOW FORECAST"
+            freezingRainLike -> "SHORT-TERM ICE FORECAST"
+            else -> "SHORT-TERM RAIN FORECAST"
+        }
+
         val intervals = window.mapIndexed { idx, item ->
+            val code = when {
+                item.precipitationMm < 0.1 -> 0
+                snowLike -> 71
+                freezingRainLike -> 66
+                else -> 61
+            }
             MinutelyPrecipInterval(
                 minuteOffset = idx * 60,
                 timeLabel = item.hourLabel,
                 precipMm = item.precipitationMm,
                 probabilityPercent = item.rainProbability,
-                weatherCode = if (item.precipitationMm >= 0.1) 61 else 0
+                weatherCode = code
             )
         }
 
@@ -1902,9 +2056,9 @@ internal object WeatherMapper {
                 .let { if (it >= 0) it + 1 else -1 }
             val summary = if (dryIdx > 0) {
                 val clearLabel = window[dryIdx].hourLabel
-                "Rain easing around $clearLabel (~${roundOneDecimal(nowItem.precipitationMm)} mm/h now)"
+                "$precipWord easing around $clearLabel (~${roundOneDecimal(nowItem.precipitationMm)} mm/h now)"
             } else {
-                "Rain continuing over the next few hours (peak ~${roundOneDecimal(maxRate)} mm/h)"
+                "$precipWord continuing over the next few hours (peak ~${roundOneDecimal(maxRate)} mm/h)"
             }
             return PrecipitationNowcast(
                 summaryText = summary,
@@ -1914,8 +2068,9 @@ internal object WeatherMapper {
                 intervals = intervals,
                 rainCessationMinutes = if (dryIdx == 1) 60 else null,
                 isHighRes15Min = false,
-                headlineLabel = "SHORT-TERM RAIN FORECAST",
-                onsetRateMmH = roundOneDecimal(nowItem.precipitationMm)
+                headlineLabel = headline,
+                onsetRateMmH = roundOneDecimal(nowItem.precipitationMm),
+                precipitationLabel = precipWord
             )
         }
 
@@ -1928,28 +2083,30 @@ internal object WeatherMapper {
             val rate = roundOneDecimal(wetHour.precipitationMm)
             val rateSuffix = if (rate >= 0.1) " (~$rate mm/h)" else ""
             return PrecipitationNowcast(
-                summaryText = "Rain likely around ${wetHour.hourLabel} (${wetHour.rainProbability}% chance$rateSuffix)",
+                summaryText = "$precipWord likely around ${wetHour.hourLabel} (${wetHour.rainProbability}% chance$rateSuffix)",
                 isPrecipitationImminent = firstWetIdx <= 2,
                 nextPrecipitationOnsetMinutes = firstWetIdx * 60,
                 maxRateMmH = roundOneDecimal(maxRate),
                 intervals = intervals,
                 rainCessationMinutes = null,
                 isHighRes15Min = false,
-                headlineLabel = "SHORT-TERM RAIN FORECAST",
-                onsetRateMmH = rate
+                headlineLabel = headline,
+                onsetRateMmH = rate,
+                precipitationLabel = precipWord
             )
         }
 
         return PrecipitationNowcast(
-            summaryText = "No measurable rain expected in the next 3 hours",
+            summaryText = "No measurable ${precipWord.lowercase(Locale.US)} expected in the next 3 hours",
             isPrecipitationImminent = false,
             nextPrecipitationOnsetMinutes = null,
             maxRateMmH = 0.0,
             intervals = intervals,
             rainCessationMinutes = null,
             isHighRes15Min = false,
-            headlineLabel = "SHORT-TERM RAIN FORECAST",
-            onsetRateMmH = 0.0
+            headlineLabel = headline,
+            onsetRateMmH = 0.0,
+            precipitationLabel = precipWord
         )
     }
 
@@ -2054,12 +2211,208 @@ internal object WeatherMapper {
         }
     }
 
-    private fun resolveZoneId(timezoneId: String?): ZoneId {
-        if (timezoneId.isNullOrBlank()) return ZoneId.systemDefault()
-        return try {
-            ZoneId.of(timezoneId)
+    internal fun resolveZoneId(timezoneId: String?): ZoneId = resolveBestZoneId(timezoneId)
+
+    /**
+     * Resolves a valid ZoneId across every worldwide API format:
+     * IANA IDs ("Asia/Kathmandu", "Etc/GMT+11"), Google remote-ocean offsets ("UTC-11:00:00"),
+     * and Google duration offsets ("19800s", "-39600s").
+     */
+    internal fun resolveBestZoneId(vararg candidates: String?): ZoneId {
+        for (raw in candidates) {
+            val parsed = parseZoneIdOrNull(raw)
+            if (parsed != null) return parsed
+        }
+        return ZoneId.systemDefault()
+    }
+
+    internal fun parseZoneIdOrNull(raw: String?): ZoneId? {
+        val trimmed = raw?.trim().orEmpty()
+        if (trimmed.isEmpty()) return null
+        try {
+            return ZoneId.of(trimmed)
         } catch (_: Exception) {
-            ZoneId.systemDefault()
+            // Try normalizing Google/offset formats below
+        }
+        // Handle "UTC-11:00:00", "UTC+05:30:00", "GMT+05:45:00"
+        val strippedPrefix = when {
+            trimmed.startsWith("UTC", ignoreCase = true) -> trimmed.substring(3).trim()
+            trimmed.startsWith("GMT", ignoreCase = true) -> trimmed.substring(3).trim()
+            else -> trimmed
+        }
+        if (strippedPrefix.isEmpty()) return ZoneOffset.UTC
+        try {
+            return ZoneOffset.of(strippedPrefix)
+        } catch (_: Exception) {
+            // Try seconds offset like "19800s" or "-39600s"
+        }
+        if (strippedPrefix.endsWith("s", ignoreCase = true)) {
+            val seconds = strippedPrefix.dropLast(1).toIntOrNull()
+            if (seconds != null && seconds in -64800..64800) {
+                return try {
+                    ZoneOffset.ofTotalSeconds(seconds)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+        return null
+    }
+
+    internal fun resolveHonestLocationName(
+        resolvedLocationName: String?,
+        latitude: Double,
+        longitude: Double
+    ): String {
+        val cleaned = resolvedLocationName?.trim()
+        if (!cleaned.isNullOrBlank()) return cleaned
+        return if (latitude != 0.0 || longitude != 0.0) {
+            LocationSearchEngine.formatCoordinates(latitude, longitude)
+        } else {
+            "Current Location"
+        }
+    }
+
+    private fun extractGooglePrecipMm(precip: Precipitation?): Double? {
+        val liquid = precip?.qpf?.quantity
+        val snow = precip?.snowQpf?.quantity
+        return when {
+            liquid != null && snow != null && liquid <= 0.0 && snow > 0.0 -> snow
+            liquid != null -> liquid
+            snow != null -> snow
+            else -> null
+        }
+    }
+
+    private fun resolvePrecipitationType(
+        googleProbType: String?,
+        conditionText: String,
+        wmoCode: Int?,
+        tempC: Double?
+    ): String {
+        val upperType = googleProbType?.trim()?.uppercase(Locale.US).orEmpty()
+        if (upperType.contains("SNOW")) return "SNOW"
+        if (upperType.contains("SLEET") || upperType.contains("ICE") || upperType.contains("FREEZING")) return "ICE"
+        if (wmoCode != null) {
+            if (wmoCode in 71..77 || wmoCode in 85..86) return "SNOW"
+            if (wmoCode in listOf(56, 57, 66, 67)) return "ICE"
+        }
+        val lowerCond = conditionText.lowercase(Locale.US)
+        if (lowerCond.contains("snow") || lowerCond.contains("blizzard") || lowerCond.contains("flurr")) return "SNOW"
+        if (lowerCond.contains("freezing") || lowerCond.contains("sleet") || lowerCond.contains("ice")) return "ICE"
+        if (tempC != null && tempC <= 0.0 && (lowerCond.contains("shower") || lowerCond.contains("precip"))) return "SNOW"
+        return "RAIN"
+    }
+
+    internal data class SunTimesResolution(
+        val sunriseLabel: String,
+        val sunsetLabel: String,
+        val daylightStatusOverride: String?,
+        val solarProgress: Float
+    )
+
+    /**
+     * Resolves sunrise/sunset honestly worldwide — including Polar Day (24h sun), Polar Night (24h dark),
+     * high-latitude midnight-crossing sunsets, and genuinely missing sun times (never fake 06:15 / 18:15!).
+     */
+    internal fun resolveSunTimes(
+        sunriseRaw: String?,
+        sunsetRaw: String?,
+        zoneId: ZoneId,
+        latitude: Double,
+        isDaytimeHint: Boolean?,
+        dayHourlyIsDay: List<Boolean> = emptyList(),
+        referenceTime: LocalTime? = null
+    ): SunTimesResolution {
+        val riseZdt = parseSunZonedDateTime(sunriseRaw, zoneId)
+        val setZdt = parseSunZonedDateTime(sunsetRaw, zoneId)
+
+        if (riseZdt != null && setZdt != null) {
+            val durationMinutes = Duration.between(riseZdt, setZdt).toMinutes()
+            if (durationMinutes >= 23 * 60 + 50) {
+                return SunTimesResolution(
+                    sunriseLabel = "24h Sun",
+                    sunsetLabel = "No Set",
+                    daylightStatusOverride = "Midnight sun · 24h daylight",
+                    solarProgress = 0.5f
+                )
+            }
+            if (abs(durationMinutes) <= 1) {
+                val polarDay = isDaytimeHint ?: (dayHourlyIsDay.isNotEmpty() && dayHourlyIsDay.all { it })
+                return if (polarDay) {
+                    SunTimesResolution(
+                        sunriseLabel = "24h Sun",
+                        sunsetLabel = "No Set",
+                        daylightStatusOverride = "Midnight sun · 24h daylight",
+                        solarProgress = 0.5f
+                    )
+                } else {
+                    SunTimesResolution(
+                        sunriseLabel = "No Rise",
+                        sunsetLabel = "24h Night",
+                        daylightStatusOverride = "Polar night · 24h darkness",
+                        solarProgress = 0.5f
+                    )
+                }
+            }
+            val fmt = DateTimeFormatter.ofPattern("HH:mm", Locale.getDefault())
+            val riseStr = riseZdt.format(fmt)
+            val setStr = setZdt.format(fmt)
+            return SunTimesResolution(
+                sunriseLabel = riseStr,
+                sunsetLabel = setStr,
+                daylightStatusOverride = null,
+                solarProgress = computeSolarProgress(riseStr, setStr, zoneId, referenceTime)
+            )
+        }
+
+        // Polar latitudes where Google/Open-Meteo intentionally return empty sunEvents={}
+        if (abs(latitude) >= 65.5) {
+            val allDay = dayHourlyIsDay.size >= 12 && dayHourlyIsDay.all { it }
+            val allNight = dayHourlyIsDay.size >= 12 && dayHourlyIsDay.none { it }
+            if (allDay || (dayHourlyIsDay.isEmpty() && isDaytimeHint == true)) {
+                return SunTimesResolution(
+                    sunriseLabel = "24h Sun",
+                    sunsetLabel = "No Set",
+                    daylightStatusOverride = "Midnight sun · 24h daylight",
+                    solarProgress = 0.5f
+                )
+            }
+            if (allNight || (dayHourlyIsDay.isEmpty() && isDaytimeHint == false)) {
+                return SunTimesResolution(
+                    sunriseLabel = "No Rise",
+                    sunsetLabel = "24h Night",
+                    daylightStatusOverride = "Polar night · 24h darkness",
+                    solarProgress = 0.5f
+                )
+            }
+        }
+
+        val riseFallback = sunriseRaw?.let { formatIsoTime(it, zoneId, fallback = "—") } ?: "—"
+        val setFallback = sunsetRaw?.let { formatIsoTime(it, zoneId, fallback = "—") } ?: "—"
+        val missingBoth = riseFallback == "—" && setFallback == "—"
+        return SunTimesResolution(
+            sunriseLabel = riseFallback,
+            sunsetLabel = setFallback,
+            daylightStatusOverride = if (missingBoth) "Sun times unavailable" else null,
+            solarProgress = if (riseFallback != "—" && setFallback != "—") {
+                computeSolarProgress(riseFallback, setFallback, zoneId, referenceTime)
+            } else {
+                0.5f
+            }
+        )
+    }
+
+    private fun parseSunZonedDateTime(raw: String?, zoneId: ZoneId): ZonedDateTime? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            if (hasIsoTimezoneOffset(raw)) {
+                OffsetDateTime.parse(raw.trim()).atZoneSameInstant(zoneId)
+            } else {
+                LocalDateTime.parse(raw.trim()).atZone(zoneId)
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -2117,6 +2470,19 @@ internal object WeatherMapper {
         val firstRainIdx = intervals.indexOfFirst { it.precipMm >= 0.1 }
         val maxRate = intervals.maxOfOrNull { it.precipMm } ?: 0.0
 
+        val isSnowNowcast = intervals.any { it.weatherCode in 71..77 || it.weatherCode in 85..86 }
+        val isIceNowcast = !isSnowNowcast && intervals.any { it.weatherCode in listOf(56, 57, 66, 67) }
+        val precipWord = when {
+            isSnowNowcast -> "Snow"
+            isIceNowcast -> "Freezing rain"
+            else -> "Rain"
+        }
+        val headline = when {
+            isSnowNowcast -> "15-MIN SNOW NOWCAST"
+            isIceNowcast -> "15-MIN ICE NOWCAST"
+            else -> "15-MIN RAIN NOWCAST"
+        }
+
         var rainCessationMinutes: Int? = null
         var onsetRateMmH = roundOneDecimal(maxRate * 4.0)
         val (summary, imminent, onsetMinutes) = when {
@@ -2126,9 +2492,9 @@ internal object WeatherMapper {
                 if (dryIdx > 0) {
                     val dryMin = intervals[dryIdx].minuteOffset
                     rainCessationMinutes = dryMin
-                    Triple("Rain stopping in ~$dryMin min", true, null)
+                    Triple("$precipWord stopping in ~$dryMin min", true, null)
                 } else {
-                    Triple("Rain continuing for next ~2 hours (peak rate ${roundOneDecimal(maxRate * 4.0)} mm/h)", true, null)
+                    Triple("$precipWord continuing for next ~2 hours (peak rate ${roundOneDecimal(maxRate * 4.0)} mm/h)", true, null)
                 }
             }
             firstRainIdx >= 0 -> {
@@ -2151,8 +2517,9 @@ internal object WeatherMapper {
             intervals = intervals,
             rainCessationMinutes = rainCessationMinutes,
             isHighRes15Min = true,
-            headlineLabel = "15-MIN RAIN NOWCAST",
-            onsetRateMmH = onsetRateMmH
+            headlineLabel = headline,
+            onsetRateMmH = onsetRateMmH,
+            precipitationLabel = precipWord
         )
     }
 
@@ -2233,19 +2600,38 @@ internal object WeatherMapper {
             val sunriseMinutes = LocalTime.parse(sunriseHHmm, formatter).toSecondOfDay() / 60f
             val sunsetMinutes = LocalTime.parse(sunsetHHmm, formatter).toSecondOfDay() / 60f
             val nowMinutes = (referenceTime ?: LocalTime.now(zoneId)).toSecondOfDay() / 60f
-            if (sunsetMinutes <= sunriseMinutes) return 0.5f
+            if (sunriseMinutes == sunsetMinutes) return 0.5f
 
-            if (nowMinutes in sunriseMinutes..sunsetMinutes) {
-                ((nowMinutes - sunriseMinutes) / (sunsetMinutes - sunriseMinutes)).coerceIn(0.05f, 0.95f)
-            } else {
-                val totalNightMinutes = (1440f - sunsetMinutes) + sunriseMinutes
-                if (totalNightMinutes <= 0f) return 0.5f
-                val elapsedNight = if (nowMinutes >= sunsetMinutes) {
-                    nowMinutes - sunsetMinutes
+            if (sunsetMinutes > sunriseMinutes) {
+                if (nowMinutes in sunriseMinutes..sunsetMinutes) {
+                    ((nowMinutes - sunriseMinutes) / (sunsetMinutes - sunriseMinutes)).coerceIn(0.05f, 0.95f)
                 } else {
-                    (1440f - sunsetMinutes) + nowMinutes
+                    val totalNightMinutes = (1440f - sunsetMinutes) + sunriseMinutes
+                    if (totalNightMinutes <= 0f) return 0.5f
+                    val elapsedNight = if (nowMinutes >= sunsetMinutes) {
+                        nowMinutes - sunsetMinutes
+                    } else {
+                        (1440f - sunsetMinutes) + nowMinutes
+                    }
+                    (elapsedNight / totalNightMinutes).coerceIn(0.05f, 0.95f)
                 }
-                (elapsedNight / totalNightMinutes).coerceIn(0.05f, 0.95f)
+            } else {
+                // High-latitude summer where sunset wraps past midnight (e.g. Reykjavik 02:55 -> 00:05)
+                val totalDayMinutes = (1440f - sunriseMinutes) + sunsetMinutes
+                val totalNightMinutes = sunriseMinutes - sunsetMinutes
+                val isInDay = nowMinutes >= sunriseMinutes || nowMinutes <= sunsetMinutes
+                if (isInDay && totalDayMinutes > 0f) {
+                    val elapsedDay = if (nowMinutes >= sunriseMinutes) {
+                        nowMinutes - sunriseMinutes
+                    } else {
+                        (1440f - sunriseMinutes) + nowMinutes
+                    }
+                    (elapsedDay / totalDayMinutes).coerceIn(0.05f, 0.95f)
+                } else if (totalNightMinutes > 0f) {
+                    ((nowMinutes - sunsetMinutes) / totalNightMinutes).coerceIn(0.05f, 0.95f)
+                } else {
+                    0.5f
+                }
             }
         } catch (_: Exception) {
             0.5f

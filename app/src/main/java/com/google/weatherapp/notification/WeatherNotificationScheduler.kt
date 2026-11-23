@@ -17,6 +17,8 @@ import com.google.weatherapp.data.model.SevereAlertInfo
 import com.google.weatherapp.data.model.SeverityRiskLevel
 import com.google.weatherapp.data.model.SkyThemeType
 import com.google.weatherapp.data.model.WeatherDashboardData
+import com.google.weatherapp.data.repository.WeatherConsensus
+import com.google.weatherapp.data.repository.WeatherMapper
 import com.google.weatherapp.data.repository.WeatherRepository
 import com.google.weatherapp.location.LocationClient
 import com.google.weatherapp.widget.WeatherWidgetUpdater
@@ -379,11 +381,16 @@ object WeatherNotificationScheduler {
     }
 
     fun isPoorAqiAlert(telemetry: BentoTelemetry): Boolean {
-        return telemetry.aqiValue > 100 || telemetry.pm25 > 35.0
+        return WeatherConsensus.isPoorAirQuality(
+            aqiValue = telemetry.aqiValue,
+            scaleLabel = telemetry.aqiScaleLabel,
+            pm25 = telemetry.pm25,
+            category = telemetry.aqiCategory
+        )
     }
 
     fun isDenseFogAlert(telemetry: BentoTelemetry): Boolean {
-        return telemetry.visibilityKm <= 1.0 && telemetry.humidityPercent >= 90
+        return telemetry.visibilityKm in 0.0..1.0 && telemetry.humidityPercent >= 90
     }
 
     fun isRainCessationAlert(nowcast: PrecipitationNowcast?): Boolean {
@@ -430,11 +437,7 @@ object WeatherNotificationScheduler {
         }
 
         // Location zone drives sun-position logic (UV); the user's own clock drives quiet hours.
-        val zoneId = try {
-            if (!data.timezone.isNullOrBlank()) ZoneId.of(data.timezone) else ZoneId.systemDefault()
-        } catch (_: Exception) {
-            ZoneId.systemDefault()
-        }
+        val zoneId = WeatherMapper.resolveZoneId(data.timezone)
         val deviceZoneId = ZoneId.systemDefault()
         val inQuietHours = isQuietHours(nowEpochMs, deviceZoneId)
         val localHour = Instant.ofEpochMilli(nowEpochMs).atZone(zoneId).hour
@@ -467,10 +470,11 @@ object WeatherNotificationScheduler {
         }
 
         val dailyList = data.dailyList
+        if (dailyList.isEmpty()) return
         val todayLocalDate = Instant.ofEpochMilli(nowEpochMs).atZone(zoneId).toLocalDate()
         val todayDateStr = "${todayLocalDate.monthValue}/${todayLocalDate.dayOfMonth}"
         val todayIdx = dailyList.indexOfFirst { it.dateText == todayDateStr }.takeIf { it >= 0 } ?: 0
-        val today = dailyList.getOrNull(todayIdx) ?: createFallbackDashboardData(zoneId).dailyList[0]
+        val today = dailyList.getOrNull(todayIdx) ?: return
         val tomorrow = dailyList.getOrNull(todayIdx + 1)
 
         // =========================================================================
@@ -630,11 +634,7 @@ object WeatherNotificationScheduler {
 
     internal fun isForToday(data: WeatherDashboardData): Boolean {
         val first = data.dailyList.firstOrNull()?.dateText ?: return false
-        val zone = try {
-            if (!data.timezone.isNullOrBlank()) ZoneId.of(data.timezone) else ZoneId.systemDefault()
-        } catch (_: Exception) {
-            ZoneId.systemDefault()
-        }
+        val zone = WeatherMapper.resolveZoneId(data.timezone)
         val today = java.time.LocalDate.now(zone)
         return first == "${today.monthValue}/${today.dayOfMonth}"
     }

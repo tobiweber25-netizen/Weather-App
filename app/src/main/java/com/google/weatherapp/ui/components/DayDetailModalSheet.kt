@@ -416,6 +416,11 @@ private fun DayDetailHeroCard(
         }
 
         if (day.rainProbability > 0 || day.precipitationMm > 0.0) {
+            val precipWord = when (day.precipitationType?.uppercase()) {
+                "SNOW" -> "snow"
+                "ICE" -> "ice"
+                else -> "rain"
+            }
             HorizontalDivider(
                 modifier = Modifier.padding(vertical = SpacingTokens.ExtraSmall),
                 thickness = BorderTokens.Hairline,
@@ -432,7 +437,7 @@ private fun DayDetailHeroCard(
                     modifier = Modifier.size(IconSizeTokens.Small)
                 )
                 Text(
-                    text = "${day.rainProbability}% chance of rain · ${day.precipitationMm} mm expected",
+                    text = "${day.rainProbability}% chance of $precipWord · ${day.precipitationMm} mm expected",
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
                     color = MaterialTheme.colorScheme.onSurface
@@ -471,6 +476,11 @@ private fun DayNightComparisonSection(day: DailyItem) {
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Small)
         ) {
+            val precipShortLabel = when (day.precipitationType?.uppercase()) {
+                "SNOW" -> "Snow"
+                "ICE" -> "Ice"
+                else -> "Rain"
+            }
             PeriodForecastCard(
                 title = "DAY",
                 isDayCard = true,
@@ -481,6 +491,7 @@ private fun DayNightComparisonSection(day: DailyItem) {
                 effectType = resolveActiveEffectForDay(day),
                 isPartlyCloudy = isPartlyCloudyCondition(day.dayConditionText),
                 rainProb = day.dayRainProbability,
+                precipLabel = precipShortLabel,
                 windText = dayWindLabel,
                 modifier = Modifier.weight(1f)
             )
@@ -495,6 +506,7 @@ private fun DayNightComparisonSection(day: DailyItem) {
                 effectType = resolveActiveEffectForNight(day),
                 isPartlyCloudy = isPartlyCloudyCondition(day.nightConditionText),
                 rainProb = day.nightRainProbability,
+                precipLabel = precipShortLabel,
                 windText = nightWindLabel,
                 modifier = Modifier.weight(1f)
             )
@@ -513,6 +525,7 @@ private fun PeriodForecastCard(
     effectType: WeatherEffectType,
     isPartlyCloudy: Boolean,
     rainProb: Int,
+    precipLabel: String = "Rain",
     windText: String,
     modifier: Modifier = Modifier
 ) {
@@ -602,7 +615,7 @@ private fun PeriodForecastCard(
         Column(verticalArrangement = Arrangement.spacedBy(SpacingTokens.Micro)) {
             if (rainProb > 0) {
                 Text(
-                    text = "Rain $rainProb%",
+                    text = "$precipLabel $rainProb%",
                     style = MaterialTheme.typography.labelSmall,
                     color = RainDropDeepBlue,
                     fontWeight = FontWeight.SemiBold
@@ -656,12 +669,20 @@ private fun DayDetailTelemetryGrid(day: DailyItem) {
                 modifier = Modifier.weight(1f)
             )
 
+            val sunriseDisplay = day.sunriseTime?.takeIf { it.isNotBlank() } ?: "—"
+            val sunsetDisplay = day.sunsetTime?.takeIf { it.isNotBlank() } ?: "—"
+            val sunSubtitle = when (sunsetDisplay) {
+                "No Set" -> "Midnight sun (24h)"
+                "24h Night" -> "Polar night (24h)"
+                "—" -> "Sunset unavailable"
+                else -> "Sunset $sunsetDisplay"
+            }
             TelemetryDetailCard(
                 title = "SUNRISE / SUNSET",
-                value = day.sunriseTime?.takeIf { it.isNotBlank() } ?: "—",
-                subtitle = "Sunset ${day.sunsetTime?.takeIf { it.isNotBlank() } ?: "—"}",
+                value = sunriseDisplay,
+                subtitle = sunSubtitle,
                 icon = Icons.Default.WbTwilight,
-                barRatio = 0.65f,
+                barRatio = if (sunriseDisplay == "—") 0f else 0.65f,
                 barColors = listOf(SunCoreDeepAmber, SunCoreGold),
                 modifier = Modifier.weight(1f)
             )
@@ -683,10 +704,10 @@ private fun DayDetailTelemetryGrid(day: DailyItem) {
 
             TelemetryDetailCard(
                 title = "HUMIDITY & CLOUDS",
-                value = "${day.humidityPercent}%",
-                subtitle = "Cloud cover ${day.cloudCoverPercent}%",
+                value = if (day.isHumidityUnavailable) "—" else "${day.humidityPercent}%",
+                subtitle = if (day.isCloudCoverUnavailable) "Cloud cover —" else "Cloud cover ${day.cloudCoverPercent}%",
                 icon = Icons.Default.Opacity,
-                barRatio = (day.humidityPercent / 100f).coerceIn(0f, 1f),
+                barRatio = if (day.isHumidityUnavailable) 0f else (day.humidityPercent / 100f).coerceIn(0f, 1f),
                 barColors = listOf(TempBarCoolColor, RainDropDeepBlue),
                 modifier = Modifier.weight(1f)
             )

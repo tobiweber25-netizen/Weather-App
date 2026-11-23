@@ -13,6 +13,7 @@ import com.google.weatherapp.MainActivity
 import com.google.weatherapp.R
 import com.google.weatherapp.data.model.SeverityRiskLevel
 import com.google.weatherapp.data.model.WeatherDashboardData
+import com.google.weatherapp.data.repository.WeatherMapper
 
 object WeatherNotificationHelper {
 
@@ -98,22 +99,11 @@ object WeatherNotificationHelper {
     ): Boolean {
         createNotificationChannels(context)
 
-        val effectiveData = if (data.dailyList.size >= 2) {
-            data
-        } else if (data.dailyList.isNotEmpty()) {
-            val fallback = WeatherNotificationScheduler.createFallbackDashboardData()
-            data.copy(dailyList = listOf(data.dailyList[0], fallback.dailyList[1]))
-        } else {
-            WeatherNotificationScheduler.createFallbackDashboardData()
-        }
-        val dailyList = effectiveData.dailyList
-        if (dailyList.isEmpty()) return false
+        val dailyList = data.dailyList
+        // Never fabricate a fake tomorrow forecast when real multi-day data is missing
+        if (dailyList.size < 2) return false
 
-        val zoneId = try {
-            if (!effectiveData.timezone.isNullOrBlank()) java.time.ZoneId.of(effectiveData.timezone) else java.time.ZoneId.systemDefault()
-        } catch (_: Exception) {
-            java.time.ZoneId.systemDefault()
-        }
+        val zoneId = WeatherMapper.resolveZoneId(data.timezone)
         val todayDate = java.time.LocalDate.now(zoneId)
         val todayStr = "${todayDate.monthValue}/${todayDate.dayOfMonth}"
         val tomorrowDate = todayDate.plusDays(1)
@@ -121,7 +111,8 @@ object WeatherNotificationHelper {
 
         val todayIdx = dailyList.indexOfFirst { it.dateText == todayStr }.takeIf { it >= 0 } ?: 0
         val tomorrowIdx = dailyList.indexOfFirst { it.dateText == tomorrowStr }.takeIf { it >= 0 }
-            ?: if (todayIdx + 1 < dailyList.size) (todayIdx + 1) else todayIdx
+            ?: (todayIdx + 1).takeIf { it < dailyList.size }
+            ?: return false
 
         val today = dailyList[todayIdx]
         val tomorrow = dailyList[tomorrowIdx]
@@ -129,7 +120,7 @@ object WeatherNotificationHelper {
         val summary = WeatherSummaryFormatter.generateTomorrowSummary(
             today = today,
             tomorrow = tomorrow,
-            locationName = effectiveData.hero.locationName
+            locationName = data.hero.locationName
         )
 
         return dispatchNotification(
@@ -150,19 +141,11 @@ object WeatherNotificationHelper {
     ): Boolean {
         createNotificationChannels(context)
 
-        val effectiveData = if (data.dailyList.isNotEmpty()) {
-            data
-        } else {
-            WeatherNotificationScheduler.createFallbackDashboardData()
-        }
-        val dailyList = effectiveData.dailyList
+        val dailyList = data.dailyList
+        // Never fabricate fake weather when real daily data is missing
         if (dailyList.isEmpty()) return false
 
-        val zoneId = try {
-            if (!effectiveData.timezone.isNullOrBlank()) java.time.ZoneId.of(effectiveData.timezone) else java.time.ZoneId.systemDefault()
-        } catch (_: Exception) {
-            java.time.ZoneId.systemDefault()
-        }
+        val zoneId = WeatherMapper.resolveZoneId(data.timezone)
         val todayDate = java.time.LocalDate.now(zoneId)
         val todayStr = "${todayDate.monthValue}/${todayDate.dayOfMonth}"
         val today = dailyList.firstOrNull { it.dateText == todayStr }
@@ -172,13 +155,13 @@ object WeatherNotificationHelper {
         val upcomingHours = if (today.hourlyList.isNotEmpty()) {
             today.hourlyList
         } else {
-            effectiveData.hourlyList.take((24 - currentLocalHour).coerceAtLeast(1))
+            data.hourlyList.take((24 - currentLocalHour).coerceAtLeast(1))
         }
 
         val summary = WeatherSummaryFormatter.generateMorningSummary(
             today = today,
             upcomingHours = upcomingHours,
-            locationName = effectiveData.hero.locationName,
+            locationName = data.hero.locationName,
             minHourOfDay = currentLocalHour
         )
 

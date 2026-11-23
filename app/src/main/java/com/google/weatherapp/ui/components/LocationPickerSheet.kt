@@ -23,14 +23,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import com.google.weatherapp.data.model.SavedLocation
+import com.google.weatherapp.data.repository.LocationSearchEngine
 import com.google.weatherapp.theme.*
+import com.google.weatherapp.ui.LocationSearchState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LocationPickerSheet(
     savedLocations: List<SavedLocation>,
     selectedCustomLocation: SavedLocation?,
-    searchResults: List<SavedLocation>,
+    searchState: LocationSearchState,
     onSearchQueryChanged: (String) -> Unit,
     onSelectLocation: (SavedLocation?) -> Unit,
     onRemoveSavedLocation: (SavedLocation) -> Unit,
@@ -97,7 +99,7 @@ fun LocationPickerSheet(
                 },
                 placeholder = {
                     Text(
-                        text = "Search any city worldwide...",
+                        text = "Search any city, suburb, or coordinates...",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 },
@@ -134,25 +136,111 @@ fun LocationPickerSheet(
                 verticalArrangement = Arrangement.spacedBy(SpacingTokens.Small),
                 contentPadding = PaddingValues(bottom = SpacingTokens.ExtraLarge)
             ) {
-                if (query.trim().length >= 2 && searchResults.isNotEmpty()) {
-                    item {
-                        Text(
-                            text = "SEARCH RESULTS",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    items(searchResults) { city ->
-                        LocationRowCard(
-                            title = city.name,
-                            subtitle = city.displaySubtitle,
-                            isSelected = false,
-                            isGps = false,
-                            cardBg = cardBg,
-                            cardBorder = cardBorder,
-                            onClick = { onSelectLocation(city) },
-                            onDelete = null
-                        )
+                val trimmedQuery = query.trim()
+                if (trimmedQuery.length >= 2) {
+                    when (searchState) {
+                        is LocationSearchState.Searching -> {
+                            item {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(CornerTokens.Large))
+                                        .background(cardBg)
+                                        .border(BorderTokens.Hairline, cardBorder, RoundedCornerShape(CornerTokens.Large))
+                                        .padding(SpacingTokens.Base),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(SpacingTokens.Medium)
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(IconSizeTokens.Small),
+                                        strokeWidth = BorderTokens.Thick
+                                    )
+                                    Text(
+                                        text = "Searching worldwide...",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        is LocationSearchState.Results -> {
+                            item {
+                                Text(
+                                    text = "SEARCH RESULTS",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            items(
+                                items = searchState.locations,
+                                key = { "${it.name}_${it.latitude}_${it.longitude}" }
+                            ) { city ->
+                                LocationRowCard(
+                                    title = city.name,
+                                    subtitle = city.displaySubtitle.ifBlank {
+                                        LocationSearchEngine.formatCoordinates(city.latitude, city.longitude)
+                                    },
+                                    isSelected = selectedCustomLocation != null &&
+                                        LocationSearchEngine.isSamePlace(selectedCustomLocation, city),
+                                    isGps = false,
+                                    cardBg = cardBg,
+                                    cardBorder = cardBorder,
+                                    onClick = { onSelectLocation(city) },
+                                    onDelete = null
+                                )
+                            }
+                        }
+                        is LocationSearchState.Empty -> {
+                            item {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(CornerTokens.Large))
+                                        .background(cardBg)
+                                        .border(BorderTokens.Hairline, cardBorder, RoundedCornerShape(CornerTokens.Large))
+                                        .padding(SpacingTokens.Base),
+                                    verticalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
+                                ) {
+                                    Text(
+                                        text = "No places found for \"${searchState.query}\"",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = "Try a city, suburb, postal code, landmark, or coordinates (e.g. 35.68, 139.65).",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        is LocationSearchState.Error -> {
+                            item {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(CornerTokens.Large))
+                                        .background(cardBg)
+                                        .border(BorderTokens.Hairline, cardBorder, RoundedCornerShape(CornerTokens.Large))
+                                        .padding(SpacingTokens.Base),
+                                    verticalArrangement = Arrangement.spacedBy(SpacingTokens.ExtraSmall)
+                                ) {
+                                    Text(
+                                        text = "Place search unavailable",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        text = searchState.message,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        LocationSearchState.Idle -> Unit
                     }
                 } else {
                     // Current GPS Option
@@ -173,19 +261,22 @@ fun LocationPickerSheet(
                         item {
                             Spacer(modifier = Modifier.height(SpacingTokens.ExtraSmall))
                             Text(
-                                text = "SAVED CITIES",
+                                text = "SAVED PLACES",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        items(savedLocations) { city ->
+                        items(
+                            items = savedLocations,
+                            key = { "${it.name}_${it.latitude}_${it.longitude}" }
+                        ) { city ->
                             val isSelected = selectedCustomLocation != null &&
-                                selectedCustomLocation.name.equals(city.name, ignoreCase = true) &&
-                                selectedCustomLocation.country.equals(city.country, ignoreCase = true) &&
-                                selectedCustomLocation.adminArea.equals(city.adminArea, ignoreCase = true)
+                                LocationSearchEngine.isSamePlace(selectedCustomLocation, city)
                             LocationRowCard(
                                 title = city.name,
-                                subtitle = city.displaySubtitle,
+                                subtitle = city.displaySubtitle.ifBlank {
+                                    LocationSearchEngine.formatCoordinates(city.latitude, city.longitude)
+                                },
                                 isSelected = isSelected,
                                 isGps = false,
                                 cardBg = cardBg,

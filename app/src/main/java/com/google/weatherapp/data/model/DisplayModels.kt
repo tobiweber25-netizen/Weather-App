@@ -33,10 +33,16 @@ data class SavedLocation(
     val country: String = "",
     val latitude: Double,
     val longitude: Double,
-    val isCurrentGps: Boolean = false
+    val isCurrentGps: Boolean = false,
+    val timezone: String? = null,
+    val countryCode: String? = null
 ) {
     val displaySubtitle: String
-        get() = listOf(adminArea, country).filter { it.isNotBlank() }.joinToString(", ")
+        get() = listOf(adminArea, country)
+            .map { it.trim() }
+            .filter { it.isNotBlank() && !it.equals(name.trim(), ignoreCase = true) }
+            .distinctBy { it.lowercase() }
+            .joinToString(", ")
 }
 
 data class HeroWeather(
@@ -133,7 +139,10 @@ data class DailyItem(
     val modelSpreadDegrees: Double = 0.8,
     val dayRainProbability: Int = rainProbability,
     val nightRainProbability: Int = rainProbability,
-    val nightWind: String = ""
+    val nightWind: String = "",
+    val isHumidityUnavailable: Boolean = false,
+    val isCloudCoverUnavailable: Boolean = false,
+    val precipitationType: String? = null
 ) {
     val hourlyList: List<HourlyItem> get() = hourlyForecast ?: emptyList()
 }
@@ -152,16 +161,18 @@ data class BentoTelemetry(
     val sunsetTime: String,
     val windDegrees: Int = 0,
     val maxUvIndex: Int = 0,
-    val aqiValue: Int = 24,
-    val aqiCategory: String = "Good",
-    val pm25: Double = 5.2,
-    val visibilityKm: Double = 10.0,
+    val aqiValue: Int = 0,
+    val aqiCategory: String = "Unavailable",
+    val pm25: Double = 0.0,
+    val visibilityKm: Double = -1.0,
     val sunProgress: Float = 0.5f,
-    val feelsLikeDegrees: Int = 22,
-    val feelsLikeReason: String = "Similar to the actual temperature",
+    val feelsLikeDegrees: Int = 0,
+    val feelsLikeReason: String = "",
     val dominantPollutantLabel: String = "",
-    val aqiScaleLabel: String = "US AQI",
-    val pressureLabel: String = "hPa • Sea level"
+    val aqiScaleLabel: String = "AQI",
+    val pressureLabel: String = "hPa • Sea level",
+    val isDewPointUnavailable: Boolean = false,
+    val daylightStatusOverride: String? = null
 )
 
 data class MinutelyPrecipInterval(
@@ -181,7 +192,8 @@ data class PrecipitationNowcast(
     val rainCessationMinutes: Int? = null,
     val isHighRes15Min: Boolean = true,
     val headlineLabel: String = "SHORT-TERM RAIN FORECAST",
-    val onsetRateMmH: Double = maxRateMmH
+    val onsetRateMmH: Double = maxRateMmH,
+    val precipitationLabel: String? = null
 )
 
 data class EnsembleDispersion(
